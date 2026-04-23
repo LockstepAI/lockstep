@@ -7,6 +7,7 @@ import { isClaudeAuthMode, isProviderName } from './providers.js';
 import { listContractRigorIds, listWorkflowPresetIds } from '../product/presets.js';
 
 export interface LockstepRC {
+  api_key?: string;
   agent?: 'codex' | 'claude';
   agent_model?: string;
   execution_mode?: 'standard' | 'yolo';
@@ -24,6 +25,7 @@ export function loadRC(): LockstepRC {
   try {
     const parsed = JSON.parse(readFileSync(RC_PATH, 'utf-8')) as Record<string, unknown>;
     return {
+      ...(typeof parsed.api_key === 'string' ? { api_key: parsed.api_key } : {}),
       ...(isProviderName(parsed.agent) ? { agent: parsed.agent } : {}),
       ...(typeof parsed.agent_model === 'string' ? { agent_model: parsed.agent_model } : {}),
       ...(parsed.execution_mode === 'standard' || parsed.execution_mode === 'yolo'

@@ -43,12 +43,16 @@ import {
   type ClaudeAuthMode,
   type ProviderName,
 } from '../utils/providers.js';
+import { LockstepApiClient } from '../remote/api.js';
+import { executeRun, parseLocalSpec } from '../remote/runner.js';
+import { normalizeRuntimeConfig, type ClientConfig } from '../remote/providers.js';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const DEFAULT_SPEC = '.lockstep.yml';
+const DEFAULT_API_URL = process.env.LOCKSTEP_API_URL ?? 'https://api.lockstepai.dev';
 const SEPARATOR = chalk.gray('\u2501'.repeat(39));
 
 // ---------------------------------------------------------------------------
@@ -176,6 +180,54 @@ async function promptYesNo(
       return false;
     }
   }
+}
+
+function loadApiKey(rc: LockstepRC = loadRC()): string | undefined {
+  if (process.env.LOCKSTEP_API_KEY?.trim()) {
+    return process.env.LOCKSTEP_API_KEY.trim();
+  }
+
+  return rc.api_key?.trim() || undefined;
+}
+
+function saveApiKey(apiKey: string): void {
+  const current = loadRC();
+  saveRC({
+    ...current,
+    api_key: apiKey,
+  });
+}
+
+function extractApiRuntimeConfigFromSpec(specYaml: string): ClientConfig {
+  const spec = parseLocalSpec(specYaml);
+  const rawConfig = spec.config;
+  if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
+    return {};
+  }
+
+  return {
+    ...(isProviderName(rawConfig.agent) ? { runner: rawConfig.agent } : {}),
+    ...(typeof rawConfig.agent_model === 'string' ? { runner_model: rawConfig.agent_model } : {}),
+    ...(rawConfig.execution_mode === 'standard' || rawConfig.execution_mode === 'yolo'
+      ? { execution_mode: rawConfig.execution_mode }
+      : {}),
+    ...(isProviderName(rawConfig.judge_mode) ? { judge: rawConfig.judge_mode } : {}),
+    ...(typeof rawConfig.judge_model === 'string' ? { judge_model: rawConfig.judge_model } : {}),
+    ...(typeof rawConfig.claude_auth_mode === 'string'
+      ? { claude_auth_mode: rawConfig.claude_auth_mode as ClientConfig['claude_auth_mode'] }
+      : {}),
+  };
+}
+
+function buildApiRuntimeConfigFromDefaults(rc: LockstepRC): ClientConfig {
+  return {
+    ...(rc.agent ? { runner: rc.agent } : {}),
+    ...(rc.agent_model ? { runner_model: rc.agent_model } : {}),
+    ...(rc.judge_mode ? { judge: rc.judge_mode } : {}),
+    ...(rc.judge_model ? { judge_model: rc.judge_model } : {}),
+    ...(rc.execution_mode ? { execution_mode: rc.execution_mode } : {}),
+    ...(rc.claude_auth_mode ? { claude_auth_mode: rc.claude_auth_mode } : {}),
+  };
 }
 
 function applyDefaultsToSpecFile(specPath: string, rc: LockstepRC): void {
@@ -706,11 +758,20 @@ program
   .option('--dry-run', 'validate spec and show plan without executing')
   .option('--phase <n>', 'run only phase N (1-indexed)', Number.parseInt)
   .option('--from-phase <n>', 'start execution from phase N (1-indexed)', Number.parseInt)
+  .option('--api-key <key>', 'Lockstep API key (or set LOCKSTEP_API_KEY)')
+  .option('--api-url <url>', 'API server URL', DEFAULT_API_URL)
+  .option('--runner <provider>', 'runner provider (codex|claude)')
+  .option('--runner-model <model>', 'runner model override')
+  .option('--judge <provider>', 'judge provider (codex|claude)')
+  .option('--judge-model <model>', 'judge model override')
+  .option('--execution-mode <mode>', 'runner autonomy (standard|yolo)')
+  .option('--claude-auth-mode <mode>', 'Claude auth mode override')
   .option('--verbose', 'show detailed output')
   .option('--no-color', 'disable colored output')
   .option('--output <path>', 'custom output directory for receipt files')
   .addOption(new Option('--step <n>', 'run only step N (1-indexed)').argParser(Number.parseInt).hideHelp())
   .addOption(new Option('--from <n>', 'start execution from step N (1-indexed)').argParser(Number.parseInt).hideHelp())
+  .addOption(new Option('--local', 'run without API orchestration').hideHelp())
   .action(async (specFile: string, opts: Record<string, unknown>) => {
     const specPath = path.resolve(specFile);
 
@@ -722,6 +783,63 @@ program
           `Run ${chalk.cyan('lockstep init')} to create a new spec file.`,
         ],
       );
+    }
+
+    const current = loadRC();
+    const apiKey = typeof opts.apiKey === 'string' && opts.apiKey.trim()
+      ? opts.apiKey.trim()
+      : loadApiKey(current);
+    const useApiMode = opts.local !== true && Boolean(apiKey);
+
+    if (useApiMode) {
+      if (opts.dryRun || opts.phase || opts.step || opts.fromPhase || opts.from || opts.output) {
+        fatal(
+          'The API-backed run flow does not support local-only flags.',
+          [
+            'Remove --dry-run, --phase, --from-phase, or --output for API-backed runs.',
+            'Use --local if you intentionally want the internal local executor.',
+          ],
+        );
+      }
+
+      const specYaml = readFileSync(specPath, 'utf-8');
+      const runtimeConfig = normalizeRuntimeConfig({
+        ...buildApiRuntimeConfigFromDefaults(current),
+        ...extractApiRuntimeConfigFromSpec(specYaml),
+        ...(isProviderName(opts.runner) ? { runner: opts.runner } : {}),
+        ...(typeof opts.runnerModel === 'string' && opts.runnerModel.trim()
+          ? { runner_model: opts.runnerModel.trim() }
+          : {}),
+        ...(isProviderName(opts.judge) ? { judge: opts.judge } : {}),
+        ...(typeof opts.judgeModel === 'string' && opts.judgeModel.trim()
+          ? { judge_model: opts.judgeModel.trim() }
+          : {}),
+        ...(opts.executionMode === 'standard' || opts.executionMode === 'yolo'
+          ? { execution_mode: opts.executionMode }
+          : {}),
+        ...(typeof opts.claudeAuthMode === 'string' && opts.claudeAuthMode.trim()
+          ? { claude_auth_mode: opts.claudeAuthMode.trim() as ClientConfig['claude_auth_mode'] }
+          : {}),
+      });
+      const availableProviders = detectAvailableProviders();
+
+      for (const provider of new Set<ProviderName>([runtimeConfig.runner, runtimeConfig.judge])) {
+        if (!availableProviders.includes(provider)) {
+          fatal(`Required provider "${provider}" is not installed or not on PATH.`);
+        }
+      }
+
+      try {
+        const apiClient = new LockstepApiClient(
+          typeof opts.apiUrl === 'string' && opts.apiUrl.trim() ? opts.apiUrl.trim() : DEFAULT_API_URL,
+          apiKey!,
+        );
+        await executeRun(apiClient, specYaml, process.cwd(), opts.verbose === true, runtimeConfig);
+        process.exit(0);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        fatal(`API-backed run failed: ${message}`);
+      }
     }
 
     const cliOptions: CLIOptions = {
@@ -1173,12 +1291,20 @@ program
     console.log('');
     console.log(chalk.gray('Choose how Lockstep should execute, review, and authenticate on this machine.'));
     console.log('');
+    console.log(`  Lockstep API key  ${current.api_key ? chalk.green('saved') : chalk.yellow('not saved')}`);
     console.log(`  Codex   ${detectBinary('codex') ? chalk.green('installed') : chalk.gray('not found')}`);
     console.log(`  Claude  ${detectBinary('claude', '-v') ? chalk.green('installed') : chalk.gray('not found')}`);
     if (availableRunners.includes('claude')) {
       console.log(`  Claude auth  ${detectedClaudeAuthModes.length > 0 ? chalk.green(detectedClaudeAuthModes.join(', ')) : chalk.yellow('none detected')}`);
     }
     console.log('');
+
+    const apiKeyInput = await prompt(
+      `Lockstep API key (Enter to ${current.api_key ? 'keep current' : 'skip for now'}): `,
+    );
+    if (apiKeyInput && !apiKeyInput.startsWith('ls_live_') && !apiKeyInput.startsWith('ls_test_')) {
+      fatal('Invalid API key format.', ['Keys should start with ls_live_ or ls_test_.']);
+    }
 
     const workflowPreset = await promptChoice<WorkflowPreset>(
       'Workflow preset',
@@ -1221,6 +1347,7 @@ program
     );
 
     const nextConfig: LockstepRC = {
+      ...(apiKeyInput ? { api_key: apiKeyInput } : current.api_key ? { api_key: current.api_key } : {}),
       agent,
       judge_mode,
       execution_mode,
@@ -1244,12 +1371,50 @@ program
     console.log(`  Runner model: ${chalk.cyan(nextConfig.agent_model ?? 'provider-default')}`);
     console.log(`  Review model: ${chalk.cyan(nextConfig.judge_model ?? 'provider-default')}`);
     console.log(`  Claude auth:  ${chalk.cyan(nextConfig.claude_auth_mode ?? 'auto')}`);
+    console.log(`  API key:      ${chalk.cyan(nextConfig.api_key ? 'saved' : 'not saved')}`);
     console.log('');
     console.log(`New ${chalk.cyan('lockstep init')} specs will use these defaults.`);
     console.log(`Use ${chalk.cyan('lockstep contract init')} to draft a contract with the saved workflow and rigor presets.`);
     if (await promptYesNo('Draft a repo policy now?', false)) {
       await runPolicyInitWizard(process.cwd());
     }
+    console.log('');
+  });
+
+program
+  .command('login')
+  .description('Save your Lockstep API key for API-backed runs')
+  .argument('<api-key>', 'your Lockstep API key (ls_live_...)')
+  .action((apiKey: string) => {
+    if (!apiKey.startsWith('ls_live_') && !apiKey.startsWith('ls_test_')) {
+      fatal('Invalid API key format.', ['Keys should start with ls_live_ or ls_test_.']);
+    }
+
+    saveApiKey(apiKey);
+    console.log('');
+    console.log(chalk.green.bold('Saved Lockstep API key'));
+    console.log('');
+  });
+
+program
+  .command('doctor')
+  .description('Show saved API auth and detected local providers')
+  .action(() => {
+    const current = loadRC();
+    const availableRunners = detectAvailableProviders();
+    const detectedClaudeAuthModes = detectClaudeAuthModes();
+
+    console.log('');
+    console.log(chalk.bold('Lockstep Doctor'));
+    console.log(SEPARATOR);
+    console.log('');
+    console.log(`  API key saved: ${current.api_key ? chalk.green('yes') : chalk.yellow('no')}`);
+    console.log(`  Codex:         ${availableRunners.includes('codex') ? chalk.green('installed') : chalk.gray('not found')}`);
+    console.log(`  Claude:        ${availableRunners.includes('claude') ? chalk.green('installed') : chalk.gray('not found')}`);
+    console.log(`  Claude auth:   ${detectedClaudeAuthModes.length > 0 ? chalk.cyan(detectedClaudeAuthModes.join(', ')) : chalk.yellow('none detected')}`);
+    console.log(`  Runner:        ${chalk.cyan(current.agent ?? DEFAULTS.agent)}`);
+    console.log(`  Review:        ${chalk.cyan(current.judge_mode ?? current.agent ?? DEFAULTS.judge_mode)}`);
+    console.log(`  Autonomy:      ${chalk.cyan(current.execution_mode ?? 'standard')}`);
     console.log('');
   });
 
