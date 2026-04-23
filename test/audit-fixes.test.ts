@@ -290,6 +290,13 @@ describe('buildAgentPrompt', () => {
 
 describe('Workspace reset with clean state tagging', () => {
   const wsDir = join(TEST_DIR, 'workspace-reset-test');
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'test',
+    GIT_COMMITTER_NAME: 'test',
+    GIT_AUTHOR_EMAIL: 'test@test.com',
+    GIT_COMMITTER_EMAIL: 'test@test.com',
+  };
 
   beforeEach(() => {
     rmSync(wsDir, { recursive: true, force: true });
@@ -298,6 +305,7 @@ describe('Workspace reset with clean state tagging', () => {
     execSync('git init -q && git add -A && git commit -q -m "init" --allow-empty', {
       cwd: wsDir,
       stdio: 'ignore',
+      env: gitEnv,
     });
     // Tag clean state
     execSync('git tag -f lockstep-clean-state', { cwd: wsDir, stdio: 'ignore' });
@@ -306,7 +314,7 @@ describe('Workspace reset with clean state tagging', () => {
   it('reset restores to tagged state even after agent commits', () => {
     // Simulate agent modifying and committing
     writeFileSync(join(wsDir, 'agent-file.txt'), 'agent wrote this');
-    execSync('git add -A && git commit -q -m "agent commit"', { cwd: wsDir, stdio: 'ignore' });
+    execSync('git add -A && git commit -q -m "agent commit"', { cwd: wsDir, stdio: 'ignore', env: gitEnv });
 
     // HEAD now points to agent's commit
     expect(existsSync(join(wsDir, 'agent-file.txt'))).toBe(true);
@@ -324,7 +332,7 @@ describe('Workspace reset with clean state tagging', () => {
     // Agent makes 3 commits
     for (let i = 0; i < 3; i++) {
       writeFileSync(join(wsDir, `file${i}.txt`), `content ${i}`);
-      execSync(`git add -A && git commit -q -m "agent commit ${i}"`, { cwd: wsDir, stdio: 'ignore' });
+      execSync(`git add -A && git commit -q -m "agent commit ${i}"`, { cwd: wsDir, stdio: 'ignore', env: gitEnv });
     }
 
     execSync('git reset --hard lockstep-clean-state && git clean -fd', { cwd: wsDir, stdio: 'ignore' });
