@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.*
+coverage/
+*.tgz
+.lockstep/
+.DS_Store
+.locksteprc
+*.tsbuildinfo

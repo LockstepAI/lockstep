@@ -1,0 +1,20 @@
+version: "1"
+
+config:
+  agent: "codex"
+  max_retries: 3
+  step_timeout: 300
+  working_directory: "."
+
+context: |
+  # Add your project context here.
+  # This text is prepended to every step prompt.
+
+steps:
+  - name: "Example step"
+    prompt: |
+      Replace this with your first task for the AI agent.
+    validate:
+      - type: file_exists
+        target: "package.json"
+        label: "Project initialized"

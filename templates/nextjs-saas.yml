@@ -1,0 +1,401 @@
+version: "1"
+
+config:
+  agent: "codex"
+  max_retries: 3
+  step_timeout: 600
+  working_directory: "."
+
+context: |
+  We are building a production-grade Next.js 14 SaaS application.
+  Technology stack:
+    - Next.js 14 with App Router and TypeScript (strict mode)
+    - Tailwind CSS for styling
+    - Prisma ORM with SQLite for development
+    - JWT-based authentication with bcrypt password hashing
+    - Stripe for payment processing
+  Conventions:
+    - All API routes live under app/api/ using Route Handlers
+    - Use server components by default; add "use client" only when needed
+    - Validate all inputs with Zod schemas
+    - Return consistent JSON: { success: boolean, data?: T, error?: string }
+    - Use proper HTTP status codes (200, 201, 400, 401, 404, 500)
+
+steps:
+  # --------------------------------------------------------------------------
+  # Step 1: Initialize Next.js project
+  # --------------------------------------------------------------------------
+  - name: "Initialize Next.js project"
+    prompt: |
+      Create a new Next.js 14 project with TypeScript, Tailwind CSS, and ESLint.
+      Set up the project structure:
+        - app/ directory using App Router (NOT pages/)
+        - app/layout.tsx as the root layout with html/body tags and global CSS import
+        - app/page.tsx as a placeholder home page
+        - components/ directory with a placeholder component
+        - lib/ directory for shared utilities
+        - tailwind.config.ts configured for the app/ and components/ directories
+        - tsconfig.json with strict mode enabled
+        - next.config.js with any sensible defaults
+      Install all dependencies. Do NOT use src/ directory; keep app/ at the root.
+    validate:
+      - type: file_exists
+        target: "package.json"
+        label: "package.json exists"
+      - type: file_exists
+        target: "app/layout.tsx"
+        label: "Root layout exists"
+      - type: file_exists
+        target: "tailwind.config.ts"
+        label: "Tailwind config exists"
+      - type: file_contains
+        path: "package.json"
+        pattern: "next"
+        label: "Next.js is a dependency"
+      - type: file_contains
+        path: "tsconfig.json"
+        pattern: "\"strict\": true"
+        is_regex: false
+        label: "TypeScript strict mode enabled"
+      - type: command_passes
+        command: "npx tsc --noEmit"
+        label: "TypeScript compiles without errors"
+        timeout: 120
+
+  # --------------------------------------------------------------------------
+  # Step 2: Set up database with Prisma
+  # --------------------------------------------------------------------------
+  - name: "Set up database with Prisma"
+    prompt: |
+      Set up Prisma ORM with SQLite for local development:
+        1. Install prisma and @prisma/client
+        2. Run npx prisma init --datasource-provider sqlite
+        3. Define the following models in prisma/schema.prisma:
+           - User: id (cuid), email (unique), name, password, role (USER/ADMIN default USER),
+             emailVerified (Boolean default false), createdAt, updatedAt
+           - Post: id (cuid), title, content (String), slug (unique), tags (String),
+             published (Boolean default false), authorId (relation to User),
+             viewCount (Int default 0), likeCount (Int default 0), createdAt, updatedAt
+           - Subscription: id (cuid), userId (relation to User), stripeCustomerId,
+             stripePriceId, status (String), currentPeriodEnd (DateTime), createdAt, updatedAt
+        4. Create lib/prisma.ts with a singleton PrismaClient (handle hot-reload in dev)
+        5. Run npx prisma db push to create the database
+        6. Run npx prisma generate
+    validate:
+      - type: file_exists
+        target: "prisma/schema.prisma"
+        label: "Prisma schema file exists"
+      - type: file_contains
+        path: "prisma/schema.prisma"
+        pattern: "model User"
+        label: "User model defined"
+      - type: file_contains
+        path: "prisma/schema.prisma"
+        pattern: "model Post"
+        label: "Post model defined"
+      - type: command_passes
+        command: "npx prisma validate"
+        label: "Prisma schema is valid"
+        timeout: 30
+      - type: command_passes
+        command: "npx prisma generate"
+        label: "Prisma client generates successfully"
+        timeout: 60
+
+  # --------------------------------------------------------------------------
+  # Step 3: Build authentication system
+  # --------------------------------------------------------------------------
+  - name: "Build authentication system"
+    prompt: |
+      Implement JWT-based authentication with bcrypt password hashing.
+      Create the following API routes:
+
+      1. app/api/auth/register/route.ts
+         - POST handler: accepts { email, name, password }
+         - Validates input with Zod (email format, password min 8 chars)
+         - Hashes password with bcrypt (salt rounds 12)
+         - Creates user in database via Prisma
+         - Returns JWT token + user object (exclude password)
+
+      2. app/api/auth/login/route.ts
+         - POST handler: accepts { email, password }
+         - Finds user by email, compares password with bcrypt
+         - Returns JWT token + user object on success
+         - Returns 401 with error message on failure
+
+      3. app/api/auth/me/route.ts
+         - GET handler: reads Authorization header (Bearer token)
+         - Verifies JWT, looks up user in database
+         - Returns user object (exclude password)
+         - Returns 401 if token is invalid or missing
+
+      4. lib/auth.ts
+         - Helper functions: signToken, verifyToken, hashPassword, comparePassword
+         - Use a JWT_SECRET from environment variable (provide a default for dev)
+
+      Install bcryptjs, jsonwebtoken, and their type definitions.
+      Add a "build" script to package.json if not present: "next build"
+    validate:
+      - type: file_exists
+        target: "app/api/auth/register/route.ts"
+        label: "Register route exists"
+      - type: file_exists
+        target: "app/api/auth/login/route.ts"
+        label: "Login route exists"
+      - type: file_exists
+        target: "app/api/auth/me/route.ts"
+        label: "Me route exists"
+      - type: file_contains
+        path: "app/api/auth/register/route.ts"
+        pattern: "bcrypt"
+        is_regex: false
+        label: "Register route uses bcrypt"
+      - type: command_passes
+        command: "npm run build"
+        label: "Next.js builds successfully"
+        timeout: 120
+      - type: test_passes
+        command: "npm test"
+        label: "Tests pass (if configured)"
+        optional: true
+        timeout: 60
+
+  # --------------------------------------------------------------------------
+  # Step 4: Build landing page (with AI judge)
+  # --------------------------------------------------------------------------
+  - name: "Build landing page"
+    prompt: |
+      Build a polished, production-quality landing page at app/page.tsx.
+      The page should include these sections, each in its own component:
+
+      1. Hero Section
+         - Bold headline with a gradient or highlighted keyword
+         - Subheadline describing the SaaS value proposition
+         - Two CTA buttons: "Get Started" (primary) and "Learn More" (secondary/outline)
+         - Optional hero illustration or decorative background
+
+      2. Features Section (at least 3 features)
+         - Icon + title + description for each feature
+         - Grid layout (responsive: 1 col mobile, 3 cols desktop)
+
+      3. Pricing Section (2 tiers minimum)
+         - Free / Starter tier and a Pro / Premium tier
+         - Feature comparison list with check/cross icons
+         - CTA button on each tier
+         - Highlight the recommended tier
+
+      4. Footer
+         - Company name, copyright, navigation links
+         - Social media icon placeholders
+
+      Requirements:
+        - Fully responsive (mobile, tablet, desktop)
+        - Use Tailwind CSS exclusively (no inline styles)
+        - Smooth scroll between sections using anchor links
+        - Accessible: proper heading hierarchy, alt text, ARIA labels
+        - Use Next.js Link component for internal navigation
+        - Import and use components from a components/ directory
+
+      Also update app/globals.css with any custom Tailwind layers or animations.
+    validate:
+      - type: file_exists
+        target: "app/page.tsx"
+        label: "Landing page exists"
+      - type: file_contains
+        path: "app/page.tsx"
+        pattern: "[Hh]ero"
+        is_regex: true
+        label: "Page references hero section"
+      - type: command_passes
+        command: "npm run build"
+        label: "Next.js builds successfully"
+        timeout: 120
+      - type: ai_judge
+        criteria: |
+          Evaluate the landing page implementation across these dimensions:
+          1. Hero Section: Does it have a compelling headline, subheadline, and CTA buttons?
+          2. Features Section: Are there at least 3 well-structured feature cards with icons?
+          3. Pricing Section: Are there at least 2 pricing tiers with feature lists and CTAs?
+          4. Footer: Does it include navigation links, copyright, and reasonable structure?
+          5. Visual Quality: Is the Tailwind CSS usage professional with proper spacing,
+             typography, colors, and visual hierarchy?
+          6. Responsiveness: Does the code use responsive Tailwind classes (sm:, md:, lg:)
+             for different screen sizes?
+        threshold: 6.5
+        max_variance: 2.0
+        evaluation_targets:
+          - "app/page.tsx"
+          - "app/globals.css"
+        label: "AI judge rates landing page quality"
+
+  # --------------------------------------------------------------------------
+  # Step 5: Build dashboard layout
+  # --------------------------------------------------------------------------
+  - name: "Build dashboard layout"
+    prompt: |
+      Create a protected dashboard section with a shared layout:
+
+      1. app/dashboard/layout.tsx
+         - Sidebar navigation with links: Dashboard, My Posts, Settings
+         - Top header bar with user greeting and logout button
+         - Responsive: sidebar collapses to hamburger menu on mobile
+         - Protect the layout: redirect to /login if no auth token
+
+      2. app/dashboard/page.tsx
+         - Welcome card showing user name and email
+         - Stats cards: Total Posts, Published Posts, Total Views (mock data is fine)
+         - Recent posts list (empty state if no posts)
+         - Quick action buttons: "New Post", "View Profile"
+
+      3. components/Sidebar.tsx - Reusable sidebar component
+      4. components/DashboardCard.tsx - Reusable stats card component
+
+      Use Tailwind CSS for all styling. The dashboard should feel like a real
+      admin panel with proper spacing, shadows, and a clean layout.
+    validate:
+      - type: file_exists
+        target: "app/dashboard/page.tsx"
+        label: "Dashboard page exists"
+      - type: file_exists
+        target: "app/dashboard/layout.tsx"
+        label: "Dashboard layout exists"
+      - type: command_passes
+        command: "npm run build"
+        label: "Next.js builds successfully"
+        timeout: 120
+
+  # --------------------------------------------------------------------------
+  # Step 6: Build CRUD API for posts
+  # --------------------------------------------------------------------------
+  - name: "Build CRUD API for posts"
+    prompt: |
+      Implement full CRUD API endpoints for posts:
+
+      1. app/api/posts/route.ts
+         - GET: List published posts with pagination (?page=1&limit=10)
+           Returns { success, data: { posts, pagination: { page, limit, total, totalPages } } }
+         - POST: Create a new post (requires auth)
+           Accepts { title, content, tags, published }
+           Auto-generates slug from title
+           Validates with Zod schema
+
+      2. app/api/posts/[id]/route.ts
+         - GET: Fetch single post by ID (increment viewCount)
+         - PUT: Update post (requires auth, must be author or admin)
+         - DELETE: Delete post (requires auth, must be author or admin)
+
+      3. app/api/posts/[id]/like/route.ts
+         - POST: Increment likeCount (no auth required)
+
+      4. lib/slugify.ts - Utility to convert title to URL-safe slug
+
+      All endpoints should:
+        - Return consistent JSON format { success, data?, error? }
+        - Use proper HTTP status codes
+        - Handle errors gracefully with try/catch
+        - Validate request bodies with Zod
+    validate:
+      - type: file_exists
+        target: "app/api/posts/route.ts"
+        label: "Posts route exists"
+      - type: file_contains
+        path: "app/api/posts/route.ts"
+        pattern: "(GET|POST)"
+        is_regex: true
+        label: "Route handles GET and/or POST"
+      - type: command_passes
+        command: "npm run build"
+        label: "Next.js builds successfully"
+        timeout: 120
+
+  # --------------------------------------------------------------------------
+  # Step 7: Add Stripe integration
+  # --------------------------------------------------------------------------
+  - name: "Add Stripe integration"
+    prompt: |
+      Integrate Stripe for subscription billing:
+
+      1. Install the stripe package (npm install stripe)
+
+      2. lib/stripe.ts
+         - Initialize Stripe client with STRIPE_SECRET_KEY env var
+         - Helper: createCheckoutSession(userId, priceId)
+         - Helper: createCustomerPortalSession(customerId)
+         - Helper: constructWebhookEvent(body, signature)
+
+      3. app/api/stripe/checkout/route.ts
+         - POST: Create a Stripe checkout session for subscription
+         - Requires auth, looks up or creates Stripe customer for user
+         - Redirects to Stripe-hosted checkout page
+         - Uses NEXT_PUBLIC_APP_URL for success/cancel URLs
+
+      4. app/api/stripe/webhook/route.ts
+         - POST: Handle Stripe webhook events
+         - Verify webhook signature with STRIPE_WEBHOOK_SECRET
+         - Handle events: checkout.session.completed, invoice.paid,
+           invoice.payment_failed, customer.subscription.deleted
+         - Update Subscription model in database accordingly
+         - Export const dynamic = "force-dynamic"
+
+      5. Update .env.example with required Stripe environment variables:
+         STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, NEXT_PUBLIC_APP_URL
+
+      Use proper error handling and logging throughout.
+    validate:
+      - type: file_contains
+        path: "package.json"
+        pattern: "stripe"
+        label: "Stripe is installed"
+      - type: file_exists
+        target: "app/api/stripe/webhook/route.ts"
+        label: "Stripe webhook route exists"
+      - type: command_passes
+        command: "npm run build"
+        label: "Next.js builds successfully"
+        timeout: 120
+
+  # --------------------------------------------------------------------------
+  # Step 8: Add tests and CI
+  # --------------------------------------------------------------------------
+  - name: "Add tests and CI pipeline"
+    prompt: |
+      Set up testing infrastructure and a GitHub Actions CI pipeline:
+
+      1. Install testing dependencies:
+         - jest, @jest/globals, ts-jest or @swc/jest
+         - @testing-library/react, @testing-library/jest-dom
+         - jest-environment-jsdom
+
+      2. Configure Jest:
+         - jest.config.ts with TypeScript support
+         - Module name mapping for @ imports
+         - Setup file for @testing-library/jest-dom
+
+      3. Write tests:
+         - __tests__/lib/auth.test.ts: test signToken, verifyToken, hashPassword
+         - __tests__/lib/slugify.test.ts: test slug generation edge cases
+         - __tests__/components/PostCard.test.tsx: render test for a post card
+           (if PostCard component exists, otherwise test another component)
+
+      4. Add "test" script to package.json: "jest"
+
+      5. Create .github/workflows/ci.yml:
+         - Trigger on push to main and pull requests
+         - Node.js 20.x
+         - Steps: checkout, setup node, install deps, lint, type-check, test, build
+         - Use npm ci for reproducible installs
+         - Cache node_modules with actions/cache
+
+      All tests must pass. The build must still succeed.
+    validate:
+      - type: file_exists
+        target: ".github/workflows/ci.yml"
+        label: "CI workflow exists"
+      - type: test_passes
+        command: "npm test"
+        label: "All tests pass"
+        timeout: 120
+      - type: command_passes
+        command: "npm run build"
+        label: "Next.js builds successfully"
+        timeout: 120

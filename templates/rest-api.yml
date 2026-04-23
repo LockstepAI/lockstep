@@ -1,0 +1,289 @@
+version: "1"
+
+config:
+  agent: "codex"
+  max_retries: 3
+  step_timeout: 300
+  working_directory: "."
+
+context: |
+  We are building a production-quality REST API with Express.js and TypeScript.
+  Architecture guidelines:
+    - Express 4.x with TypeScript (strict mode, ES2022 target)
+    - Prisma ORM with SQLite for the database
+    - Zod for request validation
+    - JWT (jsonwebtoken) for authentication
+    - Structured JSON responses: { success: boolean, data?: T, error?: string }
+    - Proper HTTP status codes: 200, 201, 400, 401, 403, 404, 500
+    - All source code lives under src/
+    - Separation of concerns: routes, middleware, models, utils
+    - Error handling via a centralized Express error handler middleware
+
+steps:
+  # --------------------------------------------------------------------------
+  # Step 1: Initialize Express + TypeScript project
+  # --------------------------------------------------------------------------
+  - name: "Initialize Express + TypeScript project"
+    prompt: |
+      Create a new Express.js project with TypeScript from scratch:
+
+      1. Initialize package.json with:
+         - "type": "module" for ESM support
+         - Scripts: "dev" (tsx watch), "build" (tsc), "start" (node dist/server.js)
+
+      2. Install dependencies:
+         - express, cors, helmet, compression, morgan
+         - zod for validation
+         - dotenv for environment variables
+         - Dev: typescript, tsx, @types/express, @types/cors, @types/morgan,
+           @types/compression, @types/node
+
+      3. Create tsconfig.json:
+         - strict: true, target: ES2022, module: NodeNext, moduleResolution: NodeNext
+         - outDir: dist, rootDir: src
+         - Include src/**/*
+
+      4. Create source files:
+         - src/app.ts: Express app with middleware stack (cors, helmet, compression,
+           morgan, json parsing), health check at GET /health returning
+           { status: "healthy", timestamp, uptime }
+         - src/server.ts: reads PORT from env (default 3000), starts the server,
+           logs startup message
+         - src/types/index.ts: shared TypeScript interfaces (ApiResponse<T>,
+           PaginatedResponse<T>)
+
+      5. Create .env.example with PORT, JWT_SECRET, DATABASE_URL
+    validate:
+      - type: file_exists
+        target: "package.json"
+        label: "package.json exists"
+      - type: file_exists
+        target: "tsconfig.json"
+        label: "tsconfig.json exists"
+      - type: file_exists
+        target: "src/app.ts"
+        label: "Express app entry point exists"
+      - type: file_contains
+        path: "package.json"
+        pattern: "express"
+        label: "Express is a dependency"
+      - type: file_contains
+        path: "package.json"
+        pattern: "typescript"
+        label: "TypeScript is a dependency"
+      - type: command_passes
+        command: "npx tsc --noEmit"
+        label: "TypeScript compiles without errors"
+        timeout: 60
+
+  # --------------------------------------------------------------------------
+  # Step 2: Set up database models with Prisma
+  # --------------------------------------------------------------------------
+  - name: "Set up database models with Prisma"
+    prompt: |
+      Set up Prisma ORM with SQLite:
+
+      1. Install prisma and @prisma/client
+      2. Run npx prisma init --datasource-provider sqlite
+
+      3. Define models in prisma/schema.prisma:
+         - User:
+           id (cuid), email (unique), name, password, role (enum: USER, ADMIN,
+           default USER), createdAt (default now), updatedAt (@updatedAt)
+           Relation: posts Post[]
+         - Post:
+           id (cuid), title, content, slug (unique), published (Boolean default false),
+           authorId (String, relation to User), viewCount (Int default 0),
+           createdAt (default now), updatedAt (@updatedAt)
+           Add index on authorId and slug
+
+      4. Create src/lib/prisma.ts with a singleton PrismaClient instance
+      5. Run npx prisma db push to sync the schema
+      6. Run npx prisma generate
+    validate:
+      - type: file_exists
+        target: "prisma/schema.prisma"
+        label: "Prisma schema exists"
+      - type: file_contains
+        path: "prisma/schema.prisma"
+        pattern: "model User"
+        label: "User model defined"
+      - type: file_contains
+        path: "prisma/schema.prisma"
+        pattern: "model Post"
+        label: "Post model defined"
+      - type: command_passes
+        command: "npx prisma validate"
+        label: "Prisma schema is valid"
+        timeout: 30
+
+  # --------------------------------------------------------------------------
+  # Step 3: Build CRUD endpoints
+  # --------------------------------------------------------------------------
+  - name: "Build CRUD endpoints"
+    prompt: |
+      Implement RESTful CRUD routes for users and posts:
+
+      1. src/routes/users.ts (Express Router):
+         - POST   /api/users          Create user (validate body with Zod)
+         - GET    /api/users           List users with pagination (?page=1&limit=10)
+         - GET    /api/users/:id       Get user by ID (exclude password from response)
+         - PUT    /api/users/:id       Update user (partial update, validate with Zod)
+         - DELETE /api/users/:id       Delete user
+         All responses use { success, data, error } format.
+
+      2. src/routes/posts.ts (Express Router):
+         - POST   /api/posts           Create post (validate body with Zod)
+         - GET    /api/posts           List published posts with pagination
+         - GET    /api/posts/:id       Get post by ID (increment viewCount)
+         - PUT    /api/posts/:id       Update post (partial update)
+         - DELETE /api/posts/:id       Delete post
+         Auto-generate slug from title on create.
+
+      3. src/middleware/error-handler.ts:
+         - Centralized error handling middleware
+         - Handles Zod validation errors (400), Prisma not-found (404),
+           Prisma unique constraint (409), and unknown errors (500)
+         - Returns consistent { success: false, error: string } format
+
+      4. src/utils/slugify.ts:
+         - Convert title to URL-safe slug (lowercase, replace spaces with hyphens,
+           strip special characters)
+
+      5. Register all routes and error handler in src/app.ts
+    validate:
+      - type: file_exists
+        target: "src/routes/users.ts"
+        label: "Users route file exists"
+      - type: file_exists
+        target: "src/routes/posts.ts"
+        label: "Posts route file exists"
+      - type: command_passes
+        command: "npx tsc --noEmit"
+        label: "TypeScript compiles without errors"
+        timeout: 60
+
+  # --------------------------------------------------------------------------
+  # Step 4: Add auth middleware with JWT
+  # --------------------------------------------------------------------------
+  - name: "Add authentication middleware"
+    prompt: |
+      Implement JWT-based authentication middleware:
+
+      1. Install jsonwebtoken, bcryptjs, and their type definitions
+         (@types/jsonwebtoken, @types/bcryptjs)
+
+      2. src/middleware/auth.ts:
+         - authMiddleware: reads Bearer token from Authorization header,
+           verifies JWT using JWT_SECRET env var, attaches decoded user payload
+           to req (extend Express Request type), calls next() on success,
+           returns 401 { success: false, error: "..." } on failure
+         - requireAdmin: checks req.user.role === "ADMIN", returns 403 if not
+         - optionalAuth: like authMiddleware but does not reject if no token
+           (sets req.user to null instead)
+
+      3. src/routes/auth.ts (Express Router):
+         - POST /api/auth/register: accepts { email, name, password },
+           validates with Zod, hashes password with bcryptjs (12 rounds),
+           creates user, returns JWT + user object
+         - POST /api/auth/login: accepts { email, password },
+           compares with bcryptjs, returns JWT + user object or 401
+         - GET /api/auth/me: protected with authMiddleware, returns current user
+
+      4. src/lib/auth.ts:
+         - signToken(payload): signs JWT with 24h expiry
+         - verifyToken(token): verifies and returns decoded payload
+         - hashPassword(password): bcrypt hash
+         - comparePassword(password, hash): bcrypt compare
+
+      5. Protect write operations:
+         - POST/PUT/DELETE on /api/posts requires authMiddleware
+         - DELETE on /api/users requires requireAdmin
+
+      6. Register auth routes in src/app.ts
+    validate:
+      - type: file_exists
+        target: "src/middleware/auth.ts"
+        label: "Auth middleware exists"
+      - type: file_contains
+        path: "src/middleware/auth.ts"
+        pattern: "(jwt|jsonwebtoken)"
+        is_regex: true
+        label: "Auth middleware uses JWT"
+      - type: command_passes
+        command: "npx tsc --noEmit"
+        label: "TypeScript compiles without errors"
+        timeout: 60
+
+  # --------------------------------------------------------------------------
+  # Step 5: Add tests, documentation, and AI quality review
+  # --------------------------------------------------------------------------
+  - name: "Add tests and documentation"
+    prompt: |
+      Add comprehensive tests and API documentation:
+
+      1. Install testing dependencies:
+         - vitest, supertest, @types/supertest
+
+      2. Create vitest.config.ts with TypeScript support
+
+      3. Write tests in src/__tests__/:
+         - health.test.ts: GET /health returns 200 with status "healthy"
+         - auth.test.ts: test register, login, and me endpoints
+           (create user, login, verify token)
+         - users.test.ts: test CRUD operations on /api/users
+           (create, list, get by id, update, delete)
+           Test 404 for non-existent user
+           Test validation errors return 400
+         - posts.test.ts: test CRUD operations on /api/posts
+           (create, list, get by id, update, delete)
+           Test slug auto-generation
+           Test viewCount increments on GET
+
+      4. Set up test database:
+         - Use a separate SQLite file for tests (test.db)
+         - Reset database before each test suite
+         - Use beforeAll/afterAll for setup/teardown
+
+      5. Add scripts to package.json:
+         - "test": "vitest run"
+         - "test:watch": "vitest"
+
+      6. Create a brief API.md with endpoint documentation:
+         - List all endpoints with method, path, auth requirement, request/response
+
+      All tests must pass. TypeScript must still compile.
+    validate:
+      - type: file_exists
+        target: "src/__tests__"
+        label: "Test directory exists"
+      - type: test_passes
+        command: "npm test"
+        label: "All tests pass"
+        timeout: 120
+      - type: command_passes
+        command: "npx tsc --noEmit"
+        label: "TypeScript compiles without errors"
+        timeout: 60
+      - type: ai_judge
+        criteria: |
+          Evaluate the REST API implementation across these dimensions:
+          1. API Design: Do endpoints follow RESTful conventions (proper HTTP methods,
+             resource naming, status codes, consistent response format)?
+          2. Error Handling: Is there centralized error handling? Are edge cases covered
+             (not found, validation errors, duplicate entries, unauthorized access)?
+          3. Code Organization: Is the codebase well-structured with clear separation
+             of routes, middleware, models, and utilities?
+          4. Security: Are passwords hashed? Is JWT implemented correctly? Are routes
+             properly protected with auth middleware?
+          5. Input Validation: Is Zod used consistently for request validation? Are
+             validation errors returned with helpful messages?
+          6. TypeScript Usage: Are types well-defined? Is strict mode used effectively
+             with minimal use of 'any'?
+        threshold: 6.0
+        max_variance: 2.5
+        evaluation_targets:
+          - "src/routes/users.ts"
+          - "src/routes/posts.ts"
+          - "src/middleware/auth.ts"
+        label: "AI judge evaluates API design quality"

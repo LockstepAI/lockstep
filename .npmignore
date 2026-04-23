@@ -1,0 +1,27 @@
+# Source files
+src/
+*.ts
+!dist/**/*.d.ts
+
+# Source maps — these let people reconstruct our TypeScript
+**/*.js.map
+**/*.d.ts.map
+
+# Dev stuff
+.github/
+test/
+tests/
+*.test.*
+*.spec.*
+.eslintrc*
+tsconfig.json
+vitest.config.*
+.env
+.env.*
+node_modules/
+.git/
+coverage/
+.lockstep/
+*.lockstep.yml
+!templates/*.yml
+CLAUDE.md

@@ -1,0 +1,321 @@
+version: "1"
+
+config:
+  agent: "codex"
+  max_retries: 3
+  step_timeout: 600
+  working_directory: "."
+
+context: |
+  We are building a Solana program using the Anchor framework (Rust).
+  The program implements a simple content platform where users can create,
+  update, and close posts stored on-chain with proper account validation.
+  Architecture guidelines:
+    - Use Anchor 0.30+ with Rust 2021 edition
+    - All accounts must have proper space calculations
+    - Use PDAs (Program Derived Addresses) for deterministic account addressing
+    - Implement custom error codes with descriptive messages
+    - Apply Anchor constraints: has_one, constraint, seeds, bump
+    - Validate all inputs (string lengths, numeric ranges)
+    - Emit events for off-chain indexing
+    - Tests are written in TypeScript using @coral-xyz/anchor
+
+steps:
+  # --------------------------------------------------------------------------
+  # Step 1: Initialize Anchor project
+  # --------------------------------------------------------------------------
+  - name: "Initialize Anchor project"
+    prompt: |
+      Initialize a new Anchor project for a content platform:
+
+      1. Run: anchor init content_platform
+         (If anchor init does not work in this environment, manually create
+         the project structure)
+
+      2. Verify the project structure has:
+         - Anchor.toml configured for localnet with the program ID
+         - programs/content_platform/Cargo.toml with anchor-lang dependency
+         - programs/content_platform/src/lib.rs with a basic #[program] module
+           containing an initialize instruction
+         - tests/ directory with a TypeScript test file
+         - package.json or tsconfig.json for test dependencies
+
+      3. The initialize instruction should:
+         - Create a PlatformConfig account (PDA seeded with "platform")
+         - Store the authority (signer) pubkey
+         - Store a post_count (u64, initialized to 0)
+         - Calculate proper space: 8 (discriminator) + 32 (authority) + 8 (post_count)
+
+      4. Make sure the program compiles with anchor build
+    validate:
+      - type: file_exists
+        target: "Anchor.toml"
+        label: "Anchor.toml exists"
+      - type: file_exists
+        target: "programs"
+        label: "Programs directory exists"
+      - type: file_exists
+        target: "tests"
+        label: "Tests directory exists"
+      - type: command_passes
+        command: "anchor build"
+        label: "Anchor builds successfully"
+        timeout: 180
+
+  # --------------------------------------------------------------------------
+  # Step 2: Define program state accounts
+  # --------------------------------------------------------------------------
+  - name: "Define program state accounts"
+    prompt: |
+      Define all account structures for the content platform program.
+
+      Create or update the program source files with these account definitions:
+
+      1. PlatformConfig account (PDA: seeds = ["platform"]):
+         - authority: Pubkey (the admin who initialized the platform)
+         - post_count: u64 (total posts created, used for post IDs)
+         - treasury: Pubkey (address to receive fees)
+
+      2. UserProfile account (PDA: seeds = ["user", user_wallet]):
+         - authority: Pubkey (the user's wallet)
+         - username: String (max 32 chars)
+         - post_count: u32 (user's personal post count)
+         - created_at: i64 (unix timestamp)
+
+      3. Post account (PDA: seeds = ["post", platform, post_id.to_le_bytes()]):
+         - author: Pubkey (reference to user's wallet)
+         - id: u64 (unique post ID from platform counter)
+         - title: String (max 64 chars)
+         - content: String (max 512 chars)
+         - created_at: i64
+         - updated_at: i64
+         - is_active: bool
+
+      Requirements:
+        - Use #[account] derive macro on all structs
+        - Calculate space accurately for each account, including string length
+          prefixes (4 bytes each) and discriminator (8 bytes)
+        - Add comments documenting the space calculation
+        - All accounts should be defined in the program source files (either
+          in lib.rs or in separate modules imported by lib.rs)
+
+      The program must compile with anchor build.
+    validate:
+      - type: file_contains
+        path: "programs/content_platform/src/lib.rs"
+        pattern: "#\\[account\\]"
+        is_regex: true
+        label: "Account structs use #[account] macro"
+      - type: command_passes
+        command: "anchor build"
+        label: "Anchor builds successfully"
+        timeout: 180
+
+  # --------------------------------------------------------------------------
+  # Step 3: Implement core instructions
+  # --------------------------------------------------------------------------
+  - name: "Implement core instructions"
+    prompt: |
+      Implement the core instructions for the content platform:
+
+      1. initialize_platform
+         - Creates PlatformConfig PDA
+         - Sets authority and treasury to the signer
+         - Sets post_count to 0
+
+      2. create_profile(username: String)
+         - Creates UserProfile PDA for the signing user
+         - Validates username length (1-32 chars)
+         - Sets created_at to Clock::get() timestamp
+
+      3. create_post(title: String, content: String)
+         - Requires user to have a profile
+         - Creates Post PDA using platform post_count as the ID
+         - Increments platform.post_count and user_profile.post_count
+         - Validates title (1-64 chars) and content (1-512 chars)
+         - Sets timestamps from Clock::get()
+         - Sets is_active to true
+
+      4. update_post(title: String, content: String)
+         - Only the original author can update
+         - Post must be active (is_active == true)
+         - Validates title and content lengths
+         - Updates the updated_at timestamp
+
+      5. delete_post
+         - Only the original author or platform authority can delete
+         - Sets is_active to false (soft delete)
+         - Reclaim rent by closing the account? Or just mark inactive.
+
+      Implement each instruction with proper Accounts structs using
+      Anchor constraints (#[account(...)]) for validation.
+      Define a custom error enum with #[error_code] for all error cases.
+
+      The program must compile with anchor build.
+    validate:
+      - type: file_contains
+        path: "programs/content_platform/src/lib.rs"
+        pattern: "pub (fn|mod)"
+        is_regex: true
+        label: "Program has public functions or modules"
+      - type: command_passes
+        command: "anchor build"
+        label: "Anchor builds successfully"
+        timeout: 180
+
+  # --------------------------------------------------------------------------
+  # Step 4: Add access control and constraints
+  # --------------------------------------------------------------------------
+  - name: "Add access control and constraints"
+    prompt: |
+      Harden the program with robust access control and Anchor constraints:
+
+      1. Account constraints:
+         - Use has_one on all accounts that reference an authority
+         - Use constraint for custom business logic checks
+         - Use seeds and bump for all PDA accounts
+         - Use close = authority on delete instructions to reclaim rent
+
+      2. Input validation:
+         - Validate all string lengths with require!() macros
+         - Validate that post IDs are within valid range
+         - Prevent empty strings for username, title, content
+
+      3. Access control:
+         - create_profile: only the wallet owner (signer) can create their profile
+         - create_post: signer must match the user_profile authority
+         - update_post: signer must match the post author
+         - delete_post: signer must be post author OR platform authority
+         - initialize_platform: unrestricted (first caller becomes authority)
+
+      4. Events (for off-chain indexing):
+         - Emit events using #[event] macro:
+           PostCreated { post_id, author, title, timestamp }
+           PostUpdated { post_id, title, timestamp }
+           PostDeleted { post_id, authority, timestamp }
+           ProfileCreated { user, username, timestamp }
+
+      5. Custom errors:
+         - InvalidStringLength, UnauthorizedAccess, PostInactive,
+           ProfileAlreadyExists, InvalidPostId, TitleTooLong, ContentTooLong
+
+      The program must compile cleanly with anchor build.
+    validate:
+      - type: file_contains
+        path: "programs/content_platform/src/lib.rs"
+        pattern: "(constraint|has_one)"
+        is_regex: true
+        label: "Program uses Anchor constraints"
+      - type: command_passes
+        command: "anchor build"
+        label: "Anchor builds successfully"
+        timeout: 180
+
+  # --------------------------------------------------------------------------
+  # Step 5: Write integration tests
+  # --------------------------------------------------------------------------
+  - name: "Write integration tests"
+    prompt: |
+      Write comprehensive TypeScript integration tests for the content platform.
+
+      Create or update the test file in tests/:
+
+      1. Setup:
+         - Use @coral-xyz/anchor for the test provider and program client
+         - Generate test keypairs for different users
+         - Derive all PDAs using PublicKey.findProgramAddressSync
+
+      2. Test cases:
+         a. Platform initialization
+            - Test that initialize_platform creates the config account
+            - Verify authority and post_count are set correctly
+
+         b. User profile creation
+            - Test creating a profile with a valid username
+            - Test that duplicate profile creation fails
+            - Test that empty username is rejected
+            - Test that username exceeding 32 chars is rejected
+
+         c. Post creation
+            - Test creating a post with valid title and content
+            - Test that post_count increments on platform and user profile
+            - Test that title > 64 chars is rejected
+            - Test that content > 512 chars is rejected
+            - Test that user without profile cannot create a post
+
+         d. Post update
+            - Test updating title and content
+            - Test that non-author cannot update
+            - Test that updated_at timestamp changes
+
+         e. Post deletion
+            - Test that author can delete their own post
+            - Test that platform authority can delete any post
+            - Test that random user cannot delete others' posts
+
+      3. Use describe/it blocks with clear test names.
+      4. Assert with expect/assert from anchor testing utilities.
+
+      Run tests with: anchor test --skip-local-validator
+    validate:
+      - type: file_exists
+        target: "tests"
+        label: "Tests directory exists"
+      - type: test_passes
+        command: "anchor test --skip-local-validator"
+        label: "All Anchor tests pass"
+        timeout: 300
+
+  # --------------------------------------------------------------------------
+  # Step 6: Build, verify, and quality review
+  # --------------------------------------------------------------------------
+  - name: "Build, verify, and quality review"
+    prompt: |
+      Final build and cleanup:
+
+      1. Run anchor build to produce the final .so binary
+      2. Verify IDL is generated correctly in target/idl/
+      3. Clean up any compiler warnings in the Rust code
+      4. Add doc comments (///) to all public functions and account structs
+      5. Ensure all error messages are descriptive and actionable
+      6. Review that all PDAs use consistent, documented seed patterns
+      7. Add a README.md with:
+         - Program overview and architecture
+         - Account structure documentation
+         - Instruction reference
+         - How to build and test
+         - Security considerations
+    validate:
+      - type: command_passes
+        command: "anchor build"
+        label: "Final anchor build succeeds"
+        timeout: 180
+      - type: command_passes
+        command: "anchor verify $(grep -oP '(?<=content_platform = \")\\w+' Anchor.toml) 2>&1 || true"
+        label: "Anchor verify attempted"
+        optional: true
+        timeout: 120
+      - type: ai_judge
+        criteria: |
+          Evaluate the Solana/Anchor program implementation across these dimensions:
+          1. Security Practices: Are all accounts properly validated with Anchor
+             constraints (has_one, seeds, bump, constraint)? Are signers checked
+             on every state-mutating instruction?
+          2. Account Validation: Are PDA seeds consistent and documented? Is space
+             calculation accurate for all accounts? Are close constraints used
+             properly for account cleanup?
+          3. Error Handling: Are custom error codes defined with descriptive messages?
+             Is require!() or constraint used for input validation? Are all failure
+             paths covered?
+          4. Code Quality: Is the code well-organized and readable? Are there doc
+             comments on public items? Is the Rust idiomatic (proper naming, no
+             unnecessary clones, efficient data structures)?
+          5. Event Emission: Are events emitted for all state changes? Do events
+             contain sufficient data for off-chain indexing?
+          6. Access Control: Is the authorization model correct? Can only authorized
+             users modify their own resources? Is admin override implemented safely?
+        threshold: 7.0
+        max_variance: 2.0
+        evaluation_targets:
+          - "programs/content_platform/src/lib.rs"
+        label: "AI judge evaluates Solana program quality"
