@@ -1,23 +1,17 @@
 # Lockstep
 
-CLI and SDK for Lockstep Dev.
+Frontier AI is a stack of open problems. We work on every layer of it.
 
-Use the CLI to connect your local `codex` and/or `claude` session, save your Lockstep API key, and run from your terminal with API-backed receipts.
+What a model is. What a model computes. What a model does.
 
-## CLI
+Three questions, three research programs, one lab.
+
+Lockstep Dev is the product live today. It lets you connect a local `codex` and/or `claude` session, save your Lockstep API key, and run from one terminal CLI with policy, verification, and API-backed receipts.
 
 ```bash
 npm install -g @lockstepai/lockstep
 lockstep setup
 lockstep run
 ```
-
-## SDK
-
-```bash
-npm install @lockstepai/sdk
-```
-
-The TypeScript client lives in [`sdk/`](./sdk).
 
 Node 18 or newer is required.
