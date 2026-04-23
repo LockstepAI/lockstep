@@ -4,12 +4,18 @@ Guided terminal CLI for Lockstep Dev.
 
 It helps you set up local provider defaults, draft repo policy, draft a contract from plain English, review the workflow, and run it locally with receipts.
 
-Lockstep runs from your machine. Install `codex` and or `claude` first, sign in there, then use Lockstep to govern and verify the workflow.
+Lockstep runs from your machine. Install `codex` and/or `claude` first, sign in there, then use Lockstep to govern and verify the workflow.
 
 ## Install
 
 ```bash
 npm install -g @lockstepai/lockstep
+```
+
+Or run it without a global install:
+
+```bash
+npx @lockstepai/lockstep setup
 ```
 
 ## Quick start

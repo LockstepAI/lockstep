@@ -8,3 +8,9 @@ coverage/
 .DS_Store
 .locksteprc
 *.tsbuildinfo
+.claude/
+__pycache__/
+*.pyc
+*.pyo
+default-policy.yml
+AUDIT_REPORT.md
