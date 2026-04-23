@@ -1,26 +1,23 @@
 # Lockstep
 
-First product for Lockstep Dev.
+CLI and SDK for Lockstep Dev.
 
-Install the CLI, grab your API key from Lockstep, connect your local `codex` and/or `claude` session, and run from your terminal with API-backed receipts.
+Use the CLI to connect your local `codex` and/or `claude` session, save your Lockstep API key, and run from your terminal with API-backed receipts.
 
-## Install
+## CLI
 
 ```bash
 npm install -g @lockstepai/lockstep
-```
-
-## Start
-
-```bash
 lockstep setup
 lockstep run
 ```
 
-If you already have a key:
+## SDK
 
 ```bash
-lockstep login ls_live_your_key_here
+npm install @lockstepai/sdk
 ```
+
+The TypeScript client lives in [`sdk/`](./sdk).
 
 Node 18 or newer is required.
