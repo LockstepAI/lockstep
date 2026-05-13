@@ -522,11 +522,11 @@ export function validateSignupResponse(data: unknown): SignupResponse {
     ...(status === undefined
       ? {}
       : {
-          status: (() => {
+          status: (() : SignupResponse['status'] => {
             if (status !== 'verification_required') {
               throw new TypeError(`Invalid API response: expected "verification_required" for SignupResponse.status, got ${String(status)}`);
             }
-            return status;
+            return 'verification_required';
           })(),
         }),
     ...(data.verification_sent === undefined

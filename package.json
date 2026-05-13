@@ -1,6 +1,6 @@
 {
   "name": "@lockstepai/lockstep",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "description": "Open-source CLI for contracted, verifiable AI software work.",
   "main": "./dist/index.js",
