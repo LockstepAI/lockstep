@@ -6,8 +6,7 @@ const CLI = 'npx tsx src/bin/lockstep.ts';
 describe('CLI smoke tests', () => {
   it('--version returns a version string', () => {
     const out = execSync(`${CLI} --version`, { encoding: 'utf-8' }).trim();
-    // The version may be a semver string or "unknown" depending on package.json name resolution
-    expect(out).toMatch(/^(\d+\.\d+\.\d+|unknown)/);
+    expect(out).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   it('--help shows commands', () => {

@@ -233,11 +233,14 @@ export interface SignupRequest {
 }
 
 export interface SignupResponse {
-  userId: string;
+  userId: string | null;
   email: string;
-  apiKey: string;
+  apiKey?: string | null;
   plan: string;
   credits: number;
+  email_verified: boolean;
+  status?: 'verification_required';
+  verification_sent?: boolean;
 }
 
 export interface LoginRequest {
@@ -508,12 +511,27 @@ export function validateBillingInvoiceSummaries(data: unknown): BillingInvoiceSu
 
 export function validateSignupResponse(data: unknown): SignupResponse {
   if (!isObject(data)) throw new TypeError('Invalid API response: expected object for SignupResponse');
+  const status = data.status;
   return {
-    userId: assertString(data, 'userId', 'SignupResponse.userId'),
+    userId: assertStringOrNull(data, 'userId', 'SignupResponse.userId'),
     email: assertString(data, 'email', 'SignupResponse.email'),
-    apiKey: assertString(data, 'apiKey', 'SignupResponse.apiKey'),
+    apiKey: assertStringOrNull(data, 'apiKey', 'SignupResponse.apiKey'),
     plan: assertString(data, 'plan', 'SignupResponse.plan'),
     credits: assertNumber(data, 'credits', 'SignupResponse.credits'),
+    email_verified: assertBoolean(data, 'email_verified', 'SignupResponse.email_verified'),
+    ...(status === undefined
+      ? {}
+      : {
+          status: (() => {
+            if (status !== 'verification_required') {
+              throw new TypeError(`Invalid API response: expected "verification_required" for SignupResponse.status, got ${String(status)}`);
+            }
+            return status;
+          })(),
+        }),
+    ...(data.verification_sent === undefined
+      ? {}
+      : { verification_sent: assertBoolean(data, 'verification_sent', 'SignupResponse.verification_sent') }),
   };
 }
 

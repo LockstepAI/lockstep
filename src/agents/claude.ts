@@ -8,6 +8,7 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN ?? 'claude';
 const CLAUDE_TOOL_TIMEOUT_SECONDS = 30;
 const CLAUDE_ALLOWED_TOOLS = 'Bash,Read,Edit,Write,Glob,Grep,LSP,TodoWrite';
 const CLAUDE_ALLOWED_TOOL_RULES = ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'LSP', 'TodoWrite'];
+const CLAUDE_HOOKED_TOOLS = ['Bash', 'Read', 'Edit', 'Write'];
 
 function buildClaudeHookCommand(
   hookScriptPath: string,
@@ -31,38 +32,16 @@ function buildClaudeSettings(
       ...(options.executionMode === 'yolo' ? {} : { allow: CLAUDE_ALLOWED_TOOL_RULES }),
     },
     hooks: {
-      PreToolUse: [
-        {
-          matcher: 'Bash',
-          hooks: [
-            {
-              type: 'command',
-              command: hookCommand,
-              timeout: CLAUDE_TOOL_TIMEOUT_SECONDS,
-            },
-          ],
-        },
-        {
-          matcher: 'Edit',
-          hooks: [
-            {
-              type: 'command',
-              command: hookCommand,
-              timeout: CLAUDE_TOOL_TIMEOUT_SECONDS,
-            },
-          ],
-        },
-        {
-          matcher: 'Write',
-          hooks: [
-            {
-              type: 'command',
-              command: hookCommand,
-              timeout: CLAUDE_TOOL_TIMEOUT_SECONDS,
-            },
-          ],
-        },
-      ],
+      PreToolUse: CLAUDE_HOOKED_TOOLS.map((tool) => ({
+        matcher: tool,
+        hooks: [
+          {
+            type: 'command',
+            command: hookCommand,
+            timeout: CLAUDE_TOOL_TIMEOUT_SECONDS,
+          },
+        ],
+      })),
     },
   };
 }
@@ -159,6 +138,25 @@ async function main() {
       const decision = engine.evaluateFileWrite(filePath);
       if (!decision.allowed) {
         deny(decision.reason ?? \`Blocked write to \${filePath}.\`);
+        return;
+      }
+    }
+
+    allow();
+    return;
+  }
+
+  if (toolName === 'Read') {
+    const paths = candidatePaths(toolInput);
+    if (paths.length === 0) {
+      deny('Blocked Read because no readable path was provided.');
+      return;
+    }
+
+    for (const filePath of paths) {
+      const decision = engine.evaluateFileRead(filePath);
+      if (!decision.allowed) {
+        deny(decision.reason ?? \`Blocked read from \${filePath}.\`);
         return;
       }
     }

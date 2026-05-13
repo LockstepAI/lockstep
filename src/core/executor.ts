@@ -1,4 +1,9 @@
 import { exec } from 'node:child_process';
+import {
+  existsSync,
+  readdirSync,
+  statSync,
+} from 'node:fs';
 import { promisify } from 'node:util';
 import path from 'node:path';
 
@@ -27,9 +32,11 @@ import { ParallelTerminalReporter } from '../reporters/terminal.js';
 import { loadPolicy } from '../policy/index.js';
 import { canonicalizeValidatorType, getPublicSignalName } from './public-surface.js';
 import { loadRC } from '../utils/config.js';
+import type { ClaudeAuthMode, ProviderName } from '../utils/providers.js';
 import { applyClaudeAuthModeToProcess } from '../utils/providers.js';
 
 const execAsync = promisify(exec);
+const PROTECTED_SNAPSHOT_SKIP = new Set(['.git', '.lockstep-tools', 'node_modules']);
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -41,6 +48,12 @@ export interface CLIOptions {
   from?: number;       // start from this step (1-indexed)
   verbose?: boolean;
   output?: string;     // custom receipt output directory
+  runner?: ProviderName;
+  runnerModel?: string;
+  judge?: JudgeConfig['mode'];
+  judgeModel?: string;
+  executionMode?: LockstepSpec['config']['execution_mode'];
+  claudeAuthMode?: ClaudeAuthMode;
 }
 
 export interface RunHeaderContext {
@@ -221,6 +234,114 @@ function getValidationTarget(validatorConfig: Record<string, unknown>): string {
   return 'unknown';
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeProtectedPattern(pattern: string): string {
+  return pattern.trim().replaceAll('\\', '/').replace(/^\.\//, '');
+}
+
+function protectedPatternMatches(relativePath: string, pattern: string): boolean {
+  const normalizedPath = relativePath.toLowerCase();
+  const normalizedPattern = normalizeProtectedPattern(pattern).toLowerCase();
+
+  if (!normalizedPattern) {
+    return false;
+  }
+
+  if (normalizedPattern.endsWith('/')) {
+    const prefix = normalizedPattern.slice(0, -1);
+    return normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
+  }
+
+  if (!normalizedPattern.includes('*')) {
+    return normalizedPath === normalizedPattern || normalizedPath.startsWith(`${normalizedPattern}/`);
+  }
+
+  const regex = new RegExp(
+    '^' +
+      escapeRegExp(normalizedPattern)
+        .replace(/\\\*\\\*/g, '.*')
+        .replace(/\\\*/g, '[^/]*') +
+      '$',
+    'i',
+  );
+
+  return regex.test(normalizedPath);
+}
+
+function listWorkspaceFiles(root: string, relativeDir = ''): string[] {
+  const absoluteDir = path.join(root, relativeDir);
+  if (!existsSync(absoluteDir)) {
+    return [];
+  }
+
+  const files: string[] = [];
+  for (const entry of readdirSync(absoluteDir, { withFileTypes: true })) {
+    if (PROTECTED_SNAPSHOT_SKIP.has(entry.name)) {
+      continue;
+    }
+
+    const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+    const absolutePath = path.join(root, relativePath);
+    if (entry.isDirectory()) {
+      files.push(...listWorkspaceFiles(root, relativePath));
+      continue;
+    }
+
+    if (entry.isFile()) {
+      files.push(relativePath);
+    }
+  }
+
+  return files;
+}
+
+function snapshotProtectedFiles(
+  workingDirectory: string,
+  protectedPatterns: string[] | undefined,
+): Map<string, string> {
+  const snapshot = new Map<string, string>();
+  if (!protectedPatterns?.length) {
+    return snapshot;
+  }
+
+  for (const relativePath of listWorkspaceFiles(workingDirectory)) {
+    if (!protectedPatterns.some((pattern) => protectedPatternMatches(relativePath, pattern))) {
+      continue;
+    }
+
+    const absolutePath = path.join(workingDirectory, relativePath);
+    if (statSync(absolutePath).isFile()) {
+      snapshot.set(relativePath, hashFileBytes(absolutePath));
+    }
+  }
+
+  return snapshot;
+}
+
+function diffProtectedSnapshots(
+  before: Map<string, string>,
+  after: Map<string, string>,
+): string[] {
+  const changed = new Set<string>();
+
+  for (const [relativePath, beforeHash] of before) {
+    if (after.get(relativePath) !== beforeHash) {
+      changed.add(relativePath);
+    }
+  }
+
+  for (const relativePath of after.keys()) {
+    if (!before.has(relativePath)) {
+      changed.add(relativePath);
+    }
+  }
+
+  return [...changed].sort();
+}
+
 function buildValidationErrorResult(
   validatorConfig: Record<string, unknown>,
   reason: unknown,
@@ -251,6 +372,21 @@ function detectJudgeConfig(spec: LockstepSpec): JudgeConfig {
     mode: spec.config.judge_mode ?? 'codex',
     model: spec.config.judge_model,
     effortLevel: spec.config.effort_level,
+  };
+}
+
+function applyRuntimeOverrides(spec: LockstepSpec, options: CLIOptions): LockstepSpec {
+  return {
+    ...spec,
+    config: {
+      ...spec.config,
+      ...(options.runner ? { agent: options.runner } : {}),
+      ...(options.runnerModel ? { agent_model: options.runnerModel } : {}),
+      ...(options.judge ? { judge_mode: options.judge } : {}),
+      ...(options.judgeModel ? { judge_model: options.judgeModel } : {}),
+      ...(options.executionMode ? { execution_mode: options.executionMode } : {}),
+      ...(options.claudeAuthMode ? { claude_auth_mode: options.claudeAuthMode } : {}),
+    },
   };
 }
 
@@ -363,7 +499,7 @@ export async function executeLockstep(
   // 1. Parse spec and gather metadata
   // -------------------------------------------------------------------------
 
-  const spec = parseSpec(specPath);
+  const spec = applyRuntimeOverrides(parseSpec(specPath), options);
   const specHash = hashFileBytes(specPath);
   const judgeConfig = detectJudgeConfig(spec);
   const savedDefaults = loadRC();
@@ -528,6 +664,7 @@ export async function executeLockstep(
 
       let agentStdoutHash: string;
       let agentStderrHash: string;
+      const protectedBefore = snapshotProtectedFiles(workingDirectory, policy.filesystem?.protected);
 
         const parallelEnabled = spec.config.parallel?.enabled ?? false;
 
@@ -614,7 +751,7 @@ export async function executeLockstep(
           // Sequential execution (original path)
           reporter.agentStart();
 
-          const agentResult = await agent.execute(prompt, {
+          let agentResult = await agent.execute(prompt, {
             workingDirectory,
             timeout: stepTimeoutMs,
             model: step.model ?? spec.config.agent_model,
@@ -624,6 +761,20 @@ export async function executeLockstep(
             onOutput: (text) => reporter.agentOutput(text),
             onStderr: (text) => reporter.agentStderr(text),
           });
+
+          const protectedAfter = snapshotProtectedFiles(workingDirectory, policy.filesystem?.protected);
+          const protectedChanges = diffProtectedSnapshots(protectedBefore, protectedAfter);
+          if (protectedChanges.length > 0) {
+            await workspaceCheckpoint.restore();
+            const detail = `Protected path modified by agent and restored: ${protectedChanges.join(', ')}`;
+            agentResult = {
+              ...agentResult,
+              success: false,
+              stderr: [agentResult.stderr.trim(), detail].filter(Boolean).join('\n'),
+              combinedOutput: [agentResult.combinedOutput.trim(), `STDERR:\n${detail}`].filter(Boolean).join('\n'),
+              exitCode: agentResult.exitCode === 0 ? 1 : agentResult.exitCode,
+            };
+          }
 
           reporter.agentComplete(agentResult);
 

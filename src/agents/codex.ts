@@ -1,11 +1,25 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
-import { delimiter, resolve } from 'node:path';
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
+import { delimiter, dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Agent, AgentResult, AgentOptions } from './base.js';
 import { PolicyEngine } from '../policy/engine.js';
 import type { PolicyDecision } from '../policy/types.js';
 
 const CODEX_BIN = process.env.CODEX_BIN ?? 'codex';
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const CODEX_HOOK_SCRIPT = resolve(MODULE_DIR, '../policy/codex-hook.js');
+const CODEX_RUNTIME_PREFIX = 'lockstep-codex-runtime-';
+const LOCKSTEP_RUNTIME_ROOT = join(homedir(), '.lockstep', 'codex-runtime');
 
 type CodexJsonEvent = {
   type?: string;
@@ -32,9 +46,11 @@ function getReasoningEffort(effortLevel?: string): string {
 function buildCodexArgs(options: AgentOptions): string[] {
   const args = [
     'exec',
+    '--enable',
+    'codex_hooks',
     ...(options.executionMode === 'yolo'
       ? ['--dangerously-bypass-approvals-and-sandbox']
-      : ['--full-auto']),
+      : ['--sandbox', 'workspace-write', '-c', 'approval_policy="never"']),
     '--json',
     '--ephemeral',
     '--skip-git-repo-check',
@@ -70,6 +86,10 @@ function formatPolicyDecision(decision: PolicyDecision): string {
     `Policy blocked ${decision.tool} action`,
     decision.reason ?? 'Blocked by policy.',
   ];
+
+  if (decision.rule) {
+    segments.push(`Rule: ${decision.rule}`);
+  }
 
   if (decision.approval_id) {
     segments.push(`Approve with: lockstep approve ${decision.approval_id}`);
@@ -113,6 +133,15 @@ function maybeEvaluatePolicy(
         return decision;
       }
     }
+  }
+
+  if (itemType === 'file_read') {
+    const filePath = typeof item.path === 'string'
+      ? item.path
+      : typeof item.file_path === 'string'
+        ? item.file_path
+        : '';
+    return filePath ? policyEngine.evaluateFileRead(filePath) : null;
   }
 
   return null;
@@ -163,7 +192,183 @@ function parseJsonLine(line: string): CodexJsonEvent | null {
   }
 }
 
-function buildCodexEnv(workingDirectory: string, baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+function quoteShellArg(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function quoteTomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function sourceCodexHome(baseEnv: NodeJS.ProcessEnv): string {
+  return resolve(baseEnv.CODEX_HOME ?? join(homedir(), '.codex'));
+}
+
+function copyIfExists(sourcePath: string, targetPath: string): void {
+  if (existsSync(sourcePath)) {
+    copyFileSync(sourcePath, targetPath);
+  }
+}
+
+function ensureConfigFeatureFlags(config: string): string {
+  const required = new Map([
+    ['codex_hooks', 'true'],
+    ['use_linux_sandbox_bwrap', 'true'],
+  ]);
+  const pending = new Set(required.keys());
+  const lines = config.split(/\r?\n/);
+  const output: string[] = [];
+  let inFeatures = false;
+  let sawFeatures = false;
+
+  const flushPending = (): void => {
+    for (const key of pending) {
+      output.push(`${key} = ${required.get(key)}`);
+    }
+    pending.clear();
+  };
+
+  for (const line of lines) {
+    const section = line.trim().match(/^\[([^\]]+)\]$/)?.[1];
+    if (section && inFeatures) {
+      flushPending();
+    }
+
+    if (section) {
+      inFeatures = section === 'features';
+      sawFeatures = sawFeatures || inFeatures;
+    }
+
+    if (inFeatures) {
+      const key = line.trim().match(/^([A-Za-z0-9_-]+)\s*=/)?.[1];
+      if (key && required.has(key)) {
+        output.push(`${key} = ${required.get(key)}`);
+        pending.delete(key);
+        continue;
+      }
+    }
+
+    output.push(line);
+  }
+
+  if (sawFeatures) {
+    flushPending();
+  } else {
+    if (output.length > 0 && output.at(-1) !== '') {
+      output.push('');
+    }
+    output.push('[features]');
+    for (const [key, value] of required) {
+      output.push(`${key} = ${value}`);
+    }
+  }
+
+  return output.join('\n').replace(/\n*$/, '\n');
+}
+
+function ensureTrustedProject(config: string, workingDirectory: string): string {
+  const header = `[projects.${quoteTomlString(workingDirectory)}]`;
+  if (config.includes(header)) {
+    return config;
+  }
+
+  const separator = config.endsWith('\n') ? '' : '\n';
+  return [
+    `${config}${separator}`,
+    header,
+    'trust_level = "trusted"',
+    '',
+  ].join('\n');
+}
+
+function writeCodexRuntimeConfig(
+  workingDirectory: string,
+  runtimeCodexHome: string,
+  baseEnv: NodeJS.ProcessEnv,
+): void {
+  const sourceHome = sourceCodexHome(baseEnv);
+  copyIfExists(join(sourceHome, 'auth.json'), join(runtimeCodexHome, 'auth.json'));
+  copyIfExists(join(sourceHome, 'installation_id'), join(runtimeCodexHome, 'installation_id'));
+  copyIfExists(join(sourceHome, 'models_cache.json'), join(runtimeCodexHome, 'models_cache.json'));
+
+  const sourceConfigPath = join(sourceHome, 'config.toml');
+  const sourceConfig = existsSync(sourceConfigPath)
+    ? readFileSync(sourceConfigPath, 'utf-8')
+    : '';
+  const configWithFeatures = ensureConfigFeatureFlags(sourceConfig);
+  writeFileSync(
+    join(runtimeCodexHome, 'config.toml'),
+    ensureTrustedProject(configWithFeatures, workingDirectory),
+    'utf-8',
+  );
+}
+
+function writeCodexHookConfig(
+  runtimeCodexHome: string,
+): void {
+  const hookCommand = `${quoteShellArg(process.execPath)} ${quoteShellArg(CODEX_HOOK_SCRIPT)}`;
+  const hooks = {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: 'Bash',
+          hooks: [
+            {
+              type: 'command',
+              command: hookCommand,
+              timeout: 10,
+              statusMessage: 'Lockstep policy check',
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  writeFileSync(
+    join(runtimeCodexHome, 'hooks.json'),
+    `${JSON.stringify(hooks, null, 2)}\n`,
+    'utf-8',
+  );
+}
+
+function buildCodexRuntimeEnv(
+  workingDirectory: string,
+  policy: AgentOptions['policy'],
+  baseEnv: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  mkdirSync(LOCKSTEP_RUNTIME_ROOT, { recursive: true });
+  const runtimeRoot = mkdtempSync(join(LOCKSTEP_RUNTIME_ROOT, CODEX_RUNTIME_PREFIX));
+  const runtimeCodexHome = join(runtimeRoot, 'home');
+  const runtimePolicyPath = join(runtimeRoot, 'policy.json');
+
+  mkdirSync(runtimeCodexHome, { recursive: true });
+  writeCodexRuntimeConfig(workingDirectory, runtimeCodexHome, baseEnv);
+  writeCodexHookConfig(runtimeCodexHome);
+  writeFileSync(runtimePolicyPath, `${JSON.stringify(policy ?? {}, null, 2)}\n`, 'utf-8');
+
+  return {
+    CODEX_HOME: runtimeCodexHome,
+    LOCKSTEP_CODEX_RUNTIME_DIR: runtimeRoot,
+    LOCKSTEP_CODEX_POLICY_PATH: runtimePolicyPath,
+    LOCKSTEP_CODEX_WORKING_DIR: workingDirectory,
+  };
+}
+
+function cleanupCodexRuntime(env: NodeJS.ProcessEnv): void {
+  const runtimeRoot = env.LOCKSTEP_CODEX_RUNTIME_DIR;
+  if (!runtimeRoot || !runtimeRoot.startsWith(join(LOCKSTEP_RUNTIME_ROOT, CODEX_RUNTIME_PREFIX))) {
+    return;
+  }
+
+  rmSync(runtimeRoot, { recursive: true, force: true });
+}
+
+function buildCodexEnv(
+  workingDirectory: string,
+  policy: AgentOptions['policy'],
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
   const toolRoot = resolve(workingDirectory, '.lockstep-tools');
   const xdgDataHome = resolve(toolRoot, 'xdg-data');
   const corepackHome = resolve(toolRoot, 'corepack');
@@ -182,6 +387,7 @@ function buildCodexEnv(workingDirectory: string, baseEnv: NodeJS.ProcessEnv = pr
 
   return {
     ...baseEnv,
+    ...buildCodexRuntimeEnv(workingDirectory, policy, baseEnv),
     NO_COLOR: '1',
     XDG_DATA_HOME: xdgDataHome,
     COREPACK_HOME: corepackHome,
@@ -199,12 +405,13 @@ export class CodexAgent implements Agent {
     const startTime = Date.now();
     const args = buildCodexArgs(options);
     const policyEngine = new PolicyEngine(options.policy ?? {}, options.workingDirectory);
+    const codexEnv = buildCodexEnv(options.workingDirectory, options.policy, options.env);
 
     return new Promise((resolve) => {
       const proc = spawn(CODEX_BIN, args, {
         cwd: options.workingDirectory,
         timeout: options.timeout,
-        env: buildCodexEnv(options.workingDirectory, options.env),
+        env: codexEnv,
       });
 
       proc.stdin.write(prompt);
@@ -275,6 +482,8 @@ export class CodexAgent implements Agent {
       });
 
       proc.on('close', (code, signal) => {
+        cleanupCodexRuntime(codexEnv);
+
         if (stdoutBuffer.trim().length > 0) {
           emitStdout(`${stdoutBuffer.trimEnd()}\n`);
         }
@@ -306,6 +515,8 @@ export class CodexAgent implements Agent {
       });
 
       proc.on('error', (err) => {
+        cleanupCodexRuntime(codexEnv);
+
         resolve({
           success: false,
           stdout: '',

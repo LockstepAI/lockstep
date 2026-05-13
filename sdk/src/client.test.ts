@@ -60,7 +60,19 @@ describe('Retry', () => {
 });
 
 describe('Auth methods', () => {
-  it('signup', async () => { expect((await c(mockFetch(200, { userId: 'u1', email: 'a@b.com', apiKey: KEY, plan: 'free', credits: 5 })).signup({ email: 'a@b.com' })).userId).toBe('u1'); });
+  it('signup', async () => {
+    const signup = await c(mockFetch(200, {
+      userId: 'u1',
+      email: 'a@b.com',
+      plan: 'free',
+      credits: 5,
+      email_verified: false,
+      status: 'verification_required',
+      verification_sent: true,
+    })).signup({ email: 'a@b.com' });
+    expect(signup.userId).toBe('u1');
+    expect(signup.email_verified).toBe(false);
+  });
   it('login', async () => { expect((await c(mockFetch(200, { access_token: 'jwt', token_type: 'Bearer', expires_in: 900 })).login({ email: 'a@b.com', password: 'p' })).access_token).toBe('jwt'); });
   it('logout revokeAll', async () => { const fn = mockFetch(200, { status: 'ok' }); await c(fn).logout(true); expect((fn as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain('all=true'); });
 });

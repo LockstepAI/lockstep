@@ -39,7 +39,7 @@ export interface LockstepPolicy {
   filesystem?: {
     /** Paths the agent can write to (glob patterns) */
     writable?: string[];
-    /** Paths that cannot be modified under any circumstances */
+    /** Paths that cannot be read or modified by agent tools */
     protected?: string[];
   };
 

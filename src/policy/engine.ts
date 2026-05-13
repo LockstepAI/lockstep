@@ -160,6 +160,246 @@ function matchesAllowOnlyPattern(segment: string, pattern: string): boolean {
   return regex.test(segment.trim());
 }
 
+function tokenizeShellSegment(segment: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  let quote: '"' | '\'' | '`' | null = null;
+  let escaped = false;
+
+  const flush = (): void => {
+    if (current.length > 0) {
+      tokens.push(current);
+      current = '';
+    }
+  };
+
+  for (let i = 0; i < segment.length; i++) {
+    const char = segment[i];
+
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\' && quote !== '\'') {
+      escaped = true;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === '\'' || char === '`') {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      flush();
+      continue;
+    }
+
+    current += char;
+  }
+
+  flush();
+  return tokens;
+}
+
+function isShellRedirectionToken(token: string): boolean {
+  return /^(?:\d?>\>?|&>|>\|)$/.test(token);
+}
+
+function inlineShellRedirectionTarget(token: string): string | null {
+  const match = token.match(/^(?:\d?>\>?|&>|>\|)(.+)$/);
+  return match?.[1] ?? null;
+}
+
+function isIgnoredWriteTarget(target: string): boolean {
+  return target === '/dev/null' || target.toLowerCase() === 'nul';
+}
+
+function commandName(token: string | undefined): string {
+  return path.basename(token ?? '').toLowerCase();
+}
+
+function isShellReadCommand(command: string): boolean {
+  return [
+    'awk',
+    'base64',
+    'cat',
+    'cut',
+    'find',
+    'grep',
+    'head',
+    'hexdump',
+    'less',
+    'more',
+    'rg',
+    'sed',
+    'strings',
+    'tail',
+    'wc',
+    'xxd',
+  ].includes(command);
+}
+
+function isShellWrapper(command: string): boolean {
+  return ['bash', 'dash', 'ksh', 'sh', 'zsh'].includes(command);
+}
+
+function shellWrapperScript(tokens: string[]): string | null {
+  if (!isShellWrapper(commandName(tokens[0]))) {
+    return null;
+  }
+
+  for (let i = 1; i < tokens.length - 1; i++) {
+    const token = tokens[i];
+    if (token === '-c' || /^-[A-Za-z]*c[A-Za-z]*$/.test(token)) {
+      return tokens[i + 1] ?? null;
+    }
+  }
+
+  return null;
+}
+
+function nonOptionTokens(tokens: string[]): string[] {
+  return tokens.filter((token) => token && !token.startsWith('-'));
+}
+
+function extractShellWriteTargets(command: string): string[] {
+  const targets: string[] = [];
+
+  for (const segment of splitShellCommands(command)) {
+    const tokens = tokenizeShellSegment(segment);
+    if (tokens.length === 0) {
+      continue;
+    }
+
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (isShellRedirectionToken(token) && tokens[i + 1]) {
+        targets.push(tokens[i + 1]);
+        i++;
+        continue;
+      }
+
+      const inlineTarget = inlineShellRedirectionTarget(token);
+      if (inlineTarget) {
+        targets.push(inlineTarget);
+      }
+    }
+
+    const command = commandName(tokens[0]);
+    const args = tokens.slice(1);
+    const nestedScript = shellWrapperScript(tokens);
+    if (nestedScript) {
+      targets.push(...extractShellWriteTargets(nestedScript));
+    }
+
+    if (command === 'tee') {
+      targets.push(...nonOptionTokens(args));
+    }
+
+    if (command === 'touch' || command === 'rm' || command === 'unlink' || command === 'mkdir' || command === 'rmdir') {
+      targets.push(...nonOptionTokens(args));
+    }
+
+    if (command === 'cp' || command === 'mv' || command === 'install') {
+      const candidates = nonOptionTokens(args);
+      const target = candidates.at(-1);
+      if (target) {
+        targets.push(target);
+      }
+    }
+  }
+
+  return Array.from(new Set(targets.filter((target) => !isIgnoredWriteTarget(target))));
+}
+
+function extractShellReadTargets(command: string): string[] {
+  const targets: string[] = [];
+
+  for (const segment of splitShellCommands(command)) {
+    const tokens = tokenizeShellSegment(segment);
+    if (tokens.length === 0) {
+      continue;
+    }
+
+    const command = commandName(tokens[0]);
+    const args = tokens.slice(1);
+    const nestedScript = shellWrapperScript(tokens);
+    if (nestedScript) {
+      targets.push(...extractShellReadTargets(nestedScript));
+    }
+
+    if (!isShellReadCommand(command)) {
+      continue;
+    }
+
+    const candidates = nonOptionTokens(args);
+    if (command === 'grep' || command === 'rg') {
+      targets.push(...(candidates.length > 1 ? candidates.slice(1) : candidates));
+      continue;
+    }
+
+    if (command === 'awk' || command === 'sed') {
+      targets.push(...(candidates.length > 1 ? candidates.slice(1) : candidates));
+      continue;
+    }
+
+    targets.push(...candidates);
+  }
+
+  return Array.from(new Set(targets.filter((target) => !isIgnoredWriteTarget(target))));
+}
+
+function extractInlineScriptWriteTargets(command: string): string[] {
+  const targets: string[] = [];
+  const patterns = [
+    /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|rmSync|unlinkSync)\s*\(\s*['"]([^'"]+)['"]/gi,
+    /\b(?:renameSync|rename|copyFileSync|copyFile)\s*\(\s*['"][^'"]+['"]\s*,\s*['"]([^'"]+)['"]/gi,
+    /\bopen\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"][^'"]*[wa+][^'"]*['"]/gi,
+    /\b(?:write_text|write_bytes|unlink|rename|replace)\s*\(\s*['"]([^'"]+)['"]/gi,
+    /\bof=([^\s'"]+)/gi,
+  ];
+
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(command)) !== null) {
+      targets.push(match[1]);
+    }
+  }
+
+  return targets;
+}
+
+function extractInlineScriptReadTargets(command: string): string[] {
+  const targets: string[] = [];
+  const patterns = [
+    /\b(?:readFileSync|readFile|createReadStream)\s*\(\s*['"]([^'"]+)['"]/gi,
+    /\bPath\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.\s*(?:read_text|read_bytes)\s*\(/gi,
+  ];
+
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(command)) !== null) {
+      if (match[1]) {
+        targets.push(match[1]);
+      }
+    }
+  }
+
+  return targets;
+}
+
 function extractUrls(command: string): string[] {
   const matches = command.match(/\bhttps?:\/\/[^\s'"]+/gi);
   return matches ?? [];
@@ -203,6 +443,11 @@ function matchGlob(filePath: string, pattern: string): boolean {
       normalizedPath === normalizedPattern ||
       normalizedPath.startsWith(`${normalizedPattern}/`)
     );
+  }
+
+  if (normalizedPattern.endsWith('/**')) {
+    const prefix = normalizedPattern.slice(0, -3);
+    return normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
   }
 
   const regex = new RegExp(
@@ -336,6 +581,16 @@ export class PolicyEngine {
     const networkDecision = this.evaluateCommandNetworkAccess(command, timestamp);
     if (networkDecision) {
       return networkDecision;
+    }
+
+    const shellReadDecision = this.evaluateShellReadTargets(command);
+    if (shellReadDecision && !shellReadDecision.allowed) {
+      return shellReadDecision;
+    }
+
+    const shellWriteDecision = this.evaluateShellWriteTargets(command);
+    if (shellWriteDecision && !shellWriteDecision.allowed) {
+      return shellWriteDecision;
     }
 
     const commandHash = this.hashCommand(trimmedCommand);
@@ -473,6 +728,54 @@ export class PolicyEngine {
     });
   }
 
+  /** Evaluate a file read against protected path policy */
+  evaluateFileRead(filePath: string): PolicyDecision {
+    const timestamp = new Date().toISOString();
+    let normalizedPath: string;
+
+    try {
+      normalizedPath = toRepoRelativePath(this.workingDirectory, filePath);
+    } catch {
+      return this.record({
+        allowed: false,
+        needs_approval: false,
+        mode: this.getMode(),
+        action: `read:${filePath}`,
+        tool: 'Read',
+        reason: 'Path escapes working directory',
+        rule: 'policy:filesystem:read-outside-root',
+        timestamp,
+      });
+    }
+
+    if (this.policy.filesystem?.protected) {
+      for (const pattern of this.policy.filesystem.protected) {
+        const normalizedPattern = normalizePolicyPathPattern(this.workingDirectory, pattern);
+        if (matchGlob(normalizedPath, normalizedPattern)) {
+          return this.record({
+            allowed: false,
+            needs_approval: false,
+            mode: this.getMode(),
+            action: `read:${normalizedPath}`,
+            tool: 'Read',
+            reason: `Protected path read blocked: "${pattern}"`,
+            rule: `policy:filesystem:protected_read:${pattern}`,
+            timestamp,
+          });
+        }
+      }
+    }
+
+    return this.record({
+      allowed: true,
+      needs_approval: false,
+      mode: this.getMode(),
+      action: `read:${normalizedPath}`,
+      tool: 'Read',
+      timestamp,
+    });
+  }
+
   /** Evaluate a direct network request against the policy */
   evaluateNetworkRequest(url: string, tool = 'Network'): PolicyDecision {
     const timestamp = new Date().toISOString();
@@ -536,6 +839,50 @@ export class PolicyEngine {
       const decision = this.evaluateNetworkUrl(url, 'Bash', timestamp, command);
       if (!decision.allowed) {
         return decision;
+      }
+    }
+
+    return null;
+  }
+
+  private evaluateShellWriteTargets(command: string): PolicyDecision | null {
+    const targets = [
+      ...extractShellWriteTargets(command),
+      ...extractInlineScriptWriteTargets(command),
+    ];
+    for (const target of targets) {
+      const decision = this.evaluateFileWrite(target);
+      if (!decision.allowed) {
+        return {
+          ...decision,
+          action: command,
+          tool: 'Bash',
+          reason: decision.reason
+            ? `Shell command writes to restricted path "${target}": ${decision.reason}`
+            : `Shell command writes to restricted path "${target}"`,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  private evaluateShellReadTargets(command: string): PolicyDecision | null {
+    const targets = [
+      ...extractShellReadTargets(command),
+      ...extractInlineScriptReadTargets(command),
+    ];
+    for (const target of targets) {
+      const decision = this.evaluateFileRead(target);
+      if (!decision.allowed) {
+        return {
+          ...decision,
+          action: command,
+          tool: 'Bash',
+          reason: decision.reason
+            ? `Shell command reads restricted path "${target}": ${decision.reason}`
+            : `Shell command reads restricted path "${target}"`,
+        };
       }
     }
 

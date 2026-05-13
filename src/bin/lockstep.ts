@@ -848,6 +848,20 @@ program
       from: (opts.fromPhase as number | undefined) ?? (opts.from as number | undefined),
       verbose: opts.verbose as boolean | undefined,
       output: opts.output as string | undefined,
+      runner: isProviderName(opts.runner) ? opts.runner : undefined,
+      runnerModel: typeof opts.runnerModel === 'string' && opts.runnerModel.trim()
+        ? opts.runnerModel.trim()
+        : undefined,
+      judge: isProviderName(opts.judge) ? opts.judge : undefined,
+      judgeModel: typeof opts.judgeModel === 'string' && opts.judgeModel.trim()
+        ? opts.judgeModel.trim()
+        : undefined,
+      executionMode: opts.executionMode === 'standard' || opts.executionMode === 'yolo'
+        ? opts.executionMode
+        : undefined,
+      claudeAuthMode: typeof opts.claudeAuthMode === 'string' && opts.claudeAuthMode.trim()
+        ? opts.claudeAuthMode.trim() as ClaudeAuthMode
+        : undefined,
     };
 
     // Disable chalk colors if --no-color is set
@@ -1325,7 +1339,7 @@ program
       current.execution_mode ?? workflow.executionMode,
     );
     let claude_auth_mode: ClaudeAuthMode | undefined = current.claude_auth_mode;
-    if (agent === 'claude' || judge_mode === 'claude' || availableRunners.includes('claude')) {
+    if (agent === 'claude' || judge_mode === 'claude') {
       const claudeOptions = Array.from(new Set<ClaudeAuthMode>([
         'auto',
         ...detectedClaudeAuthModes,
@@ -1384,7 +1398,7 @@ program
 program
   .command('login')
   .description('Save your Lockstep API key for API-backed runs')
-  .argument('<api-key>', 'your Lockstep API key (ls_live_...)')
+  .argument('<api-key>', 'your Lockstep API key (ls_live_... or ls_test_...)')
   .action((apiKey: string) => {
     if (!apiKey.startsWith('ls_live_') && !apiKey.startsWith('ls_test_')) {
       fatal('Invalid API key format.', ['Keys should start with ls_live_ or ls_test_.']);

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -70,6 +71,7 @@ function setCaptureEnv(capture: {
 
 const ORIGINAL_ENV = { ...process.env };
 const TEMP_DIRS: string[] = [];
+const RUNTIME_DIRS: string[] = [];
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -85,6 +87,9 @@ afterEach(() => {
 
   while (TEMP_DIRS.length > 0) {
     rmSync(TEMP_DIRS.pop()!, { recursive: true, force: true });
+  }
+  while (RUNTIME_DIRS.length > 0) {
+    rmSync(RUNTIME_DIRS.pop()!, { recursive: true, force: true });
   }
 });
 
@@ -111,7 +116,11 @@ describe('CodexAgent', () => {
 
     const args = readFileSync(capture.argsPath, 'utf-8').trim().split('\n');
     expect(args).toContain('exec');
-    expect(args).toContain('--full-auto');
+    expect(args).toContain('--enable');
+    expect(args).toContain('codex_hooks');
+    expect(args).toContain('--sandbox');
+    expect(args).toContain('workspace-write');
+    expect(args).toContain('approval_policy="never"');
     expect(args).toContain('--json');
     expect(args).toContain('--ephemeral');
     expect(args).toContain('--skip-git-repo-check');
@@ -148,6 +157,8 @@ describe('CodexAgent', () => {
     const args = readFileSync(capture.argsPath, 'utf-8').trim().split('\n');
     expect(args).toContain('exec');
     expect(args).toContain('--json');
+    expect(args).toContain('--enable');
+    expect(args).toContain('codex_hooks');
     expect(args).toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(args).not.toContain('--full-auto');
   });
@@ -198,6 +209,52 @@ sleep 5
     expect(result.stderr).toContain('lockstep approve');
   });
 
+  it('blocks protected Codex file-read events when surfaced by the JSON stream', async () => {
+    const dir = makeTempDir('lockstep-agent-codex-read-policy-');
+    TEMP_DIRS.push(dir);
+
+    const binDir = join(dir, 'bin');
+    mkdirSync(binDir, { recursive: true });
+
+    const argsPath = join(dir, 'codex.args');
+    const stdinPath = join(dir, 'codex.stdin');
+    const blockedPath = join(dir, 'secrets/prod.key');
+    const scriptPath = writeExecutable(
+      binDir,
+      'codex',
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" > "$FAKE_ARGS_PATH"
+cat > "$FAKE_STDIN_PATH"
+cat <<'EOF'
+{"type":"item.started","item":{"id":"item_1","type":"file_read","path":"${blockedPath}","status":"in_progress"}}
+EOF
+sleep 5
+`,
+    );
+
+    setCaptureEnv({ binDir, argsPath, stdinPath });
+    process.env.CODEX_BIN = scriptPath;
+
+    const { CodexAgent } = await importFresh<typeof import('../src/agents/codex.js')>(
+      '../src/agents/codex.js',
+    );
+
+    const result = await new CodexAgent().execute('read the secret', {
+      workingDirectory: dir,
+      timeout: 10_000,
+      policy: {
+        filesystem: {
+          protected: ['secrets/**'],
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.stderr).toContain('Policy blocked Read action');
+    expect(result.stderr).toContain('protected_read');
+  });
+
   it('routes Codex package-manager state into the workspace-local tool cache', async () => {
     const dir = makeTempDir('lockstep-agent-codex-env-');
     TEMP_DIRS.push(dir);
@@ -208,6 +265,8 @@ sleep 5
     const argsPath = join(dir, 'codex.args');
     const stdinPath = join(dir, 'codex.stdin');
     const envPath = join(dir, 'codex.env');
+    const hooksCapturePath = join(dir, 'codex-hooks.json');
+    const policyCapturePath = join(dir, 'codex-policy.json');
     const scriptPath = writeExecutable(
       binDir,
       'codex',
@@ -216,12 +275,18 @@ set -euo pipefail
 printf '%s\\n' "$@" > "$FAKE_ARGS_PATH"
 cat > "$FAKE_STDIN_PATH"
 cat > "$FAKE_ENV_PATH" <<EOF
+CODEX_HOME=$CODEX_HOME
+LOCKSTEP_CODEX_RUNTIME_DIR=$LOCKSTEP_CODEX_RUNTIME_DIR
+LOCKSTEP_CODEX_POLICY_PATH=$LOCKSTEP_CODEX_POLICY_PATH
+LOCKSTEP_CODEX_WORKING_DIR=$LOCKSTEP_CODEX_WORKING_DIR
 XDG_DATA_HOME=$XDG_DATA_HOME
 COREPACK_HOME=$COREPACK_HOME
 PNPM_HOME=$PNPM_HOME
 npm_config_cache=$npm_config_cache
 pnpm_config_store_dir=$pnpm_config_store_dir
 EOF
+cat "$CODEX_HOME/hooks.json" > "$FAKE_HOOKS_PATH"
+cat "$LOCKSTEP_CODEX_POLICY_PATH" > "$FAKE_POLICY_PATH"
 cat <<'EOF'
 {"type":"item.completed","item":{"type":"agent_message","text":"ok"}}
 EOF
@@ -231,6 +296,8 @@ EOF
     setCaptureEnv({ binDir, argsPath, stdinPath });
     process.env.CODEX_BIN = scriptPath;
     process.env.FAKE_ENV_PATH = envPath;
+    process.env.FAKE_HOOKS_PATH = hooksCapturePath;
+    process.env.FAKE_POLICY_PATH = policyCapturePath;
 
     const { CodexAgent } = await importFresh<typeof import('../src/agents/codex.js')>(
       '../src/agents/codex.js',
@@ -248,6 +315,28 @@ EOF
       const [key, value] = line.split('=', 2);
       return [key, value];
     }));
+
+    expect(entries.CODEX_HOME).not.toContain(dir);
+    expect(entries.CODEX_HOME).toContain('lockstep-codex-runtime-');
+    expect(entries.LOCKSTEP_CODEX_POLICY_PATH).not.toContain(dir);
+    expect(entries.LOCKSTEP_CODEX_POLICY_PATH).toContain('lockstep-codex-runtime-');
+    expect(entries.LOCKSTEP_CODEX_RUNTIME_DIR).not.toContain(dir);
+    expect(entries.LOCKSTEP_CODEX_RUNTIME_DIR).toContain('lockstep-codex-runtime-');
+
+    const runtimeDir = entries.LOCKSTEP_CODEX_RUNTIME_DIR;
+    RUNTIME_DIRS.push(runtimeDir);
+    expect(entries.LOCKSTEP_CODEX_WORKING_DIR).toBe(dir);
+    expect(existsSync(runtimeDir)).toBe(false);
+    expect(JSON.parse(readFileSync(hooksCapturePath, 'utf-8'))).toMatchObject({
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+          },
+        ],
+      },
+    });
+    expect(JSON.parse(readFileSync(policyCapturePath, 'utf-8'))).toEqual({});
 
     expect(entries.XDG_DATA_HOME).toBe(join(dir, '.lockstep-tools', 'xdg-data'));
     expect(entries.COREPACK_HOME).toBe(join(dir, '.lockstep-tools', 'corepack'));
@@ -321,6 +410,10 @@ EOF
       permissions?: { allow?: string[] };
     };
     expect(settings.permissions?.allow).toContain('Bash');
+    const matchers = ((settings as { hooks?: { PreToolUse?: Array<{ matcher?: string }> } }).hooks?.PreToolUse ?? [])
+      .map((hook) => hook.matcher);
+    expect(matchers).toContain('Bash');
+    expect(matchers).toContain('Read');
     expect(settings.permissions?.allow).toContain('Write');
   });
 

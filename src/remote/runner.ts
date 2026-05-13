@@ -18,6 +18,7 @@ import {
   applyClaudeAuthMode,
   type RuntimeConfig,
 } from './providers.js';
+import { canonicalizeSpecInput } from '../core/public-surface.js';
 
 const CODEX_BIN = process.env.CODEX_BIN ?? 'codex';
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? 'claude';
@@ -736,7 +737,7 @@ export function parseLocalSpec(specYaml: string): LocalSpec {
   }
 
   const loadOptions = { maxAliases: 100 } as yaml.LoadOptions;
-  const parsed = yaml.load(specYaml, loadOptions) as Record<string, unknown>;
+  const parsed = canonicalizeSpecInput(yaml.load(specYaml, loadOptions)) as Record<string, unknown>;
   if (!parsed || !Array.isArray(parsed.steps)) {
     throw new Error('Invalid spec: missing steps array');
   }

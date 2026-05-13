@@ -169,4 +169,156 @@ describe('PolicyEngine modes', () => {
       tool: 'Bash',
     });
   });
+
+  it('blocks Bash redirection writes to protected files', () => {
+    const dir = makeTempDir();
+    cleanupDirs.push(dir);
+    const engine = new PolicyEngine({
+      mode: 'strict',
+      filesystem: {
+        protected: ['.env'],
+        writable: ['src/**'],
+      },
+    }, dir);
+
+    const decision = engine.evaluateShellCommand('printf tampered > .env');
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.tool).toBe('Bash');
+    expect(decision.rule).toBe('policy:filesystem:protected:.env');
+    expect(decision.reason).toContain('Shell command writes to restricted path ".env"');
+  });
+
+  it('blocks tee writes to protected files', () => {
+    const dir = makeTempDir();
+    cleanupDirs.push(dir);
+    const engine = new PolicyEngine({
+      mode: 'strict',
+      filesystem: {
+        protected: ['secrets/**'],
+        writable: ['src/**'],
+      },
+    }, dir);
+
+    const decision = engine.evaluateShellCommand('echo nope | tee secrets/prod.key');
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.rule).toBe('policy:filesystem:protected:secrets/**');
+  });
+
+  it('blocks protected writes hidden inside nested shell wrappers', () => {
+    const dir = makeTempDir();
+    cleanupDirs.push(dir);
+    const engine = new PolicyEngine({
+      mode: 'strict',
+      filesystem: {
+        protected: ['.env', 'secrets/**'],
+        writable: ['src/**'],
+      },
+    }, dir);
+
+    const envDecision = engine.evaluateShellCommand("bash -lc 'printf tampered > .env'");
+    const secretDecision = engine.evaluateShellCommand('sh -c "touch secrets/prod.key"');
+
+    expect(envDecision.allowed).toBe(false);
+    expect(envDecision.rule).toBe('policy:filesystem:protected:.env');
+    expect(secretDecision.allowed).toBe(false);
+    expect(secretDecision.rule).toBe('policy:filesystem:protected:secrets/**');
+  });
+
+  it('blocks protected reads through direct file tools', () => {
+    const dir = makeTempDir();
+    cleanupDirs.push(dir);
+    const engine = new PolicyEngine({
+      mode: 'strict',
+      filesystem: {
+        protected: ['.env', 'secrets/**'],
+      },
+    }, dir);
+
+    const envDecision = engine.evaluateFileRead('.env');
+    const secretDecision = engine.evaluateFileRead('secrets/prod.key');
+    const srcDecision = engine.evaluateFileRead('src/index.ts');
+
+    expect(envDecision.allowed).toBe(false);
+    expect(envDecision.rule).toBe('policy:filesystem:protected_read:.env');
+    expect(secretDecision.allowed).toBe(false);
+    expect(secretDecision.rule).toBe('policy:filesystem:protected_read:secrets/**');
+    expect(srcDecision.allowed).toBe(true);
+  });
+
+  it('blocks shell read commands against protected paths', () => {
+    const dir = makeTempDir();
+    cleanupDirs.push(dir);
+    const engine = new PolicyEngine({
+      mode: 'strict',
+      filesystem: {
+        protected: ['.env', 'secrets/**'],
+      },
+    }, dir);
+
+    const grepDecision = engine.evaluateShellCommand('grep -R prod-secret secrets');
+    const rgDecision = engine.evaluateShellCommand('rg prod-secret secrets/prod.key');
+    const nodeDecision = engine.evaluateShellCommand('node -e "require(\'fs\').readFileSync(\'secrets/prod.key\', \'utf8\')"');
+
+    expect(grepDecision.allowed).toBe(false);
+    expect(grepDecision.rule).toBe('policy:filesystem:protected_read:secrets/**');
+    expect(rgDecision.allowed).toBe(false);
+    expect(rgDecision.rule).toBe('policy:filesystem:protected_read:secrets/**');
+    expect(nodeDecision.allowed).toBe(false);
+    expect(nodeDecision.rule).toBe('policy:filesystem:protected_read:secrets/**');
+  });
+
+  it('matches protected directory roots for /** patterns', () => {
+    const dir = makeTempDir();
+    cleanupDirs.push(dir);
+    const engine = new PolicyEngine({
+      mode: 'strict',
+      filesystem: {
+        protected: ['secrets/**'],
+      },
+    }, dir);
+
+    const decision = engine.evaluateFileRead('secrets');
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.rule).toBe('policy:filesystem:protected_read:secrets/**');
+  });
+
+  it('blocks protected writes hidden in common inline scripts', () => {
+    const dir = makeTempDir();
+    cleanupDirs.push(dir);
+    const engine = new PolicyEngine({
+      mode: 'strict',
+      filesystem: {
+        protected: ['.env', 'prod.db'],
+        writable: ['src/**'],
+      },
+    }, dir);
+
+    const nodeDecision = engine.evaluateShellCommand('node -e "require(\'fs\').writeFileSync(\'prod.db\', \'tampered\')"');
+    const pythonDecision = engine.evaluateShellCommand('python -c "open(\'.env\', \'w\').write(\'tampered\')"');
+
+    expect(nodeDecision.allowed).toBe(false);
+    expect(nodeDecision.rule).toBe('policy:filesystem:protected:prod.db');
+    expect(pythonDecision.allowed).toBe(false);
+    expect(pythonDecision.rule).toBe('policy:filesystem:protected:.env');
+  });
+
+  it('allows Bash redirection writes inside writable paths', () => {
+    const dir = makeTempDir();
+    cleanupDirs.push(dir);
+    const engine = new PolicyEngine({
+      mode: 'strict',
+      filesystem: {
+        protected: ['.env'],
+        writable: ['src/**'],
+      },
+    }, dir);
+
+    const decision = engine.evaluateShellCommand('printf ok > src/generated.txt');
+
+    expect(decision.allowed).toBe(true);
+    expect(decision.tool).toBe('Bash');
+  });
 });

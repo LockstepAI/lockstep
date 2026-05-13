@@ -10,7 +10,13 @@ export function getLockstepVersion(): string {
       const candidate = path.join(dir, 'package.json');
       try {
         const pkg = JSON.parse(readFileSync(candidate, 'utf-8'));
-        if (pkg.name === '@lockstep-ai/lockstep' || pkg.name === 'lockstep') return pkg.version || 'unknown';
+        if (
+          pkg.name === '@lockstepai/lockstep'
+          || pkg.name === '@lockstep-ai/lockstep'
+          || pkg.name === 'lockstep'
+        ) {
+          return pkg.version || 'unknown';
+        }
       } catch { /* keep walking */ }
       const parent = path.dirname(dir);
       if (parent === dir) break;
